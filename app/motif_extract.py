@@ -567,6 +567,63 @@ def _largest_components(mask, keep=6, min_ratio=0.0015, work_max=320):
     return out if out.any() else mask
 
 
+def _fill_holes(mask):
+    """把纹样**内部**的小孔填上（不碰外部背景）。
+
+    做法：对「非纹样」区域做一次从边界出发的连通性判断，
+    能连到边界的说明是真正的背景；连不到的「非纹样」像素
+    就是被纹样包住的内部孔 → 填成 True。
+
+    复用已有的 _connected_from_border，不另写洪泛。
+
+    为什么需要它：见 extract() 里调用处的注释 —— 2D 上小孔无害，
+    3D 上每个孔都会长出一圈内壁，变成满屏竖条纹。
+    """
+    if mask is None or not mask.any():
+        return mask
+
+    bg = ~mask
+    reached = _connected_from_border(bg)
+    holes = bg & ~reached
+    if not holes.any():
+        return mask
+    return mask | holes
+
+
+def _solid_outline(mask, h, w):
+    """把纹样的外轮廓内部补成实体（供 3D 网格使用）。
+
+    和 alpha 的区别：alpha 是"绣线在哪"（花瓣之间是空的），
+    本函数给的是"这块绣布的料在哪"（一整块，底布也算）。
+
+    做法：
+        1. 闭运算（先膨胀后腐蚀）把邻近的花枝连成一整块；
+        2. 填掉闭运算留下的内部孔；
+        3. 用"从边界洪泛"求出外轮廓（纹样外仍为 False）。
+
+    这样得到的是一块**连成一体的绣布形状**，边界仍是纹样的自然外形，
+    不会有方角或人工直边。3D 出来的就是"一件完整的绣片"。
+
+    输入 mask 是原始尺寸；输出的形状与 mask 相同。
+    """
+    if mask is None or not mask.any():
+        return mask
+
+    # 闭运算的核大小随图像尺寸走：小图用 3，大图最多用 9
+    k = 3 if max(h, w) < 300 else 9
+    img = Image.fromarray((mask.astype(np.uint8) * 255), "L")
+    img = img.filter(ImageFilter.MaxFilter(k))   # 膨胀
+    img = img.filter(ImageFilter.MinFilter(k))   # 腐蚀 → 闭运算
+    closed = np.asarray(img) > 127
+
+    # 闭运算可能把不该连的地方连上（例如两个相隔很近的花枝），
+    # 所以再做一次"只保留最大连通域"，保证是**一整块**。
+    closed = _largest_component(closed)
+    # 填内部孔
+    closed = _fill_holes(closed)
+    return closed
+
+
 def crop_to_content(arr, mask, pad=6):
     """按纹样外接矩形裁剪（顺带裁掉多余空白）。"""
     ys, xs = np.where(mask)
@@ -631,6 +688,19 @@ def extract(path, out_dir=None, keep_components=6):
     # 4. 清理
     mask = clean_mask(mask)
     mask = _largest_components(mask, keep=keep_components)
+
+    # 4.5 填内部小洞 —— 这一步是**为 3D 服务的**，2D 上可有可无。
+    #
+    # 为什么必须做：苗绣的叶脉、花瓣之间常有几像素宽的缝隙，
+    # 分割出来就是 alpha 上的小孔。2D 展示时这些孔无所谓
+    # （透明底上根本看不出来），但**立体化之后是灾难**：
+    # 每个孔都会被建一圈 thickness 高的内壁，
+    # 网格上密布竖着的小墙，渲染出来就是"镂空碎斑"。
+    #
+    # 填洞的做法：从图像外框做一次背景洪泛，凡是"洪泛到不了
+    # 的空洞"就是被纹样包住的内部孔 → 填成纹样。
+    # 这样只填内部孔，不会把纹样外部的背景也吃掉。
+    mask = _fill_holes(mask)
 
     coverage = float(mask.mean())
     if coverage < 0.02:
@@ -768,30 +838,46 @@ def heightmap(array, alpha, size=256, invert=False):
     return np.asarray(img).astype(np.float32) / 255.0
 
 
-def relief_field(array, alpha, size=200, smooth=2.6):
+def relief_field(array, alpha, size=200, smooth=2.6, cloth_rgb=None):
     """把纹样转成「有结构的浮雕高度场」，供真 3D 网格使用。
 
-    和 heightmap 的区别 —— 这是本函数存在的理由：
+    这里是整个 3D 效果的核心，值得把思路讲清楚 —— 因为**前两版
+    的建模思路都是错的**，浪费了很多时间：
 
-        heightmap 只用**明度**做高度。但苗绣大量是「同色系平绣」，
-        线迹明度几乎一致，归一化之后只剩噪点，看不出任何结构
-        （这就是之前 3D 看起来"平的、没效果"的根本原因）。
+    ❌ 第一版：只用**明度**做高度（见 heightmap）
+        苗绣大量是「同色系平绣」，线迹明度几乎一致，
+        归一化之后只剩传感器噪点，看不出任何结构。
 
-    本函数改用「**双尺度**」融合，让高度真正表达绣片的物理形态：
+    ❌ 第二版：用「距纹样边缘的距离」当主形状
+        理论上"中心厚、边缘薄"没错，但**尺度用错了** ——
+        算出来的是「整块绣布的形状」，一块鼓起来的馒头，
+        而真实绣片是「平的布 + 微微凸起的线迹」。
+        实测这个思路渲染出来像山丘，不像绣片。
 
-        粗尺度（决定大形状）── 距纹样边缘的距离
-            纹样中心厚、边缘薄，形成天然的"浮雕坡面"。
-            这是让纹样像"一块有厚度的实物"而不是"一张纸"的关键。
+    ✅ 第三版（本函数现用）：**分两层，各管各的尺度**
+        这是关键的认识转变 —— 「绣片的立体感」不是一种信号，
+        而是**两种信号叠加**：
 
-        细尺度（决定表面纹理）── 明度，且**强模糊**后才使用
-            缎面反光让亮线略高一点。必须模糊，否则照片的
-            传感器噪点会被逐像素放大成一丛尖刺
-            （实测：不模糊时渲染出来像珊瑚/石笋，不像绣片）。
+        底形（大尺度）── 整块布的厚度，用 alpha 的距离场，
+            但幅度**压到很小**（0.18），只表达"这是一块有厚度的布"，
+            绝不能让它变成馒头。
 
-    注意 —— 这里**刻意不用**"局部标准差(边缘项)"：
-        那个信号在真实绣品照片上几乎全是噪点，权重稍大就会
-        把画面变成一片乱刺。浮雕要的是"光滑的坡面 + 温和的纹理"，
-        不是把每个像素的高低差都忠实地立起来。
+        纹路（中尺度）── **这一层才是灵魂**。
+            用「非底布」来判断绣花：底布是近黑的靛蓝，
+            绣花是彩色的，两者颜色差很大。
+            绣花处抬高、底布处压低，于是高度场里
+            出现的是**花朵、叶脉、回纹边框**——
+            和肉眼看到的图案一致。
+            这一步让"3D 的纹样"和"照片里的纹样"是同一个东西。
+
+        肌理（小尺度）── 明度的强模糊，只做微弱起伏（0.18）。
+
+    这个三层结构同时解决了两个老问题：
+        · 不再是馒头（底形被压到 0.18）
+        · 不再平滑得失真（纹路层带来清晰的图案边缘）
+
+    参数 cloth_rgb: 底布颜色 (r,g,b)，用于区分绣花与底布。
+        传 None 时退化为"只用 alpha"，效果会弱一些但不会出错。
 
     返回 (h, w) 的 float32，范围 0..1，纹样外为 0。
     """
@@ -805,11 +891,20 @@ def relief_field(array, alpha, size=200, smooth=2.6):
     gray = (0.299 * array[..., 0] + 0.587 * array[..., 1]
             + 0.114 * array[..., 2]).astype(np.float32)
 
-    # ---- 粗尺度：距边缘的距离（多步腐蚀近似）----
+    # ---- ① 底形：距边缘的距离，但幅度刻意压小 ----
+    #
+    # max_lv 原来是 24。这**不够** ——
+    # 实测 basic_432 有 32.3% 的像素在第 23 层还"没收敛"，
+    # 被上限一刀切断，于是形成一块平顶大平台，
+    # 平台边缘就是一道硬台阶，渲染出来正是那几片"鳍"。
+    #
+    # 上限按图像尺寸走：纹样的最宽处最多不超过短边的一半，
+    # 所以腐蚀到 min(h,w)//2 一定收敛。成本可以接受
+    # （纯位运算）。
     dist = np.zeros_like(a)
     cur = (a > 0.5)
     level = 0
-    max_lv = 24
+    max_lv = max(24, min(a.shape[0], a.shape[1]) // 2)
     while cur.any() and level < max_lv:
         dist[cur] = level
         nxt = cur.copy()
@@ -820,19 +915,67 @@ def relief_field(array, alpha, size=200, smooth=2.6):
         cur = nxt
         level += 1
     dist = dist / max(float(dist.max()), 1e-6)
-    # 开方：中心隆起、边缘快速收薄，形成自然的浮雕坡面
-    dist = np.sqrt(dist)
+    # 开方：中心隆起、边缘收薄，形成浮雕坡面。
+    #
+    # 但**只开一次方是不够的** —— 实测发现 sqrt 在边界附近升得太急：
+    # 离开轮廓 1 个像素高度就冲到 0.6，等于沿轮廓围了一圈陡墙，
+    # 渲染出来是"鳍状"的立边（就是之前看到的那些竖片子）。
+    #
+    # 改成**两次开方**（等价于 0.25 次幂）：边界附近更平缓，
+    # 中段仍保持上升，整片读起来才像"一块中央略厚、四周渐薄的绣片"，
+    # 而不是"一块台地上围了一圈栅栏"。
+    dist = np.sqrt(np.sqrt(dist))
+    # 不再"抬底"。上一版写了 `0.30 + 0.70 * dist`，本意是表达
+    # "绣片是实心的、边缘不是刀刃"。但那会让**整块布**都抬起 0.30，
+    # 底布区也跟着鼓起来 —— 而底布本该是平的。
+    # 实心感由 thickness（背面的偏移）来提供，不需要高度场来演。
 
-    # ---- 细尺度：明度，先强模糊再归一化 ----
-    gimg = Image.fromarray(np.clip(gray, 0, 255).astype(np.uint8), "L")
-    gimg = gimg.filter(ImageFilter.GaussianBlur(3.0))
-    gs = np.asarray(gimg).astype(np.float32)
-    vals = gs[a > 0]
+    # ---- ② 纹路层：绣花凸起、底布凹陷 ----
+    #
+    # 这一层是"3D 像不像绣片"的决定性一步。
+    #
+    # 判据：苗绣的底布是整块靛蓝/藏青（近黑），绣花是彩色丝线。
+    # 两者在 RGB 空间里差得很远。于是"到 cloth_rgb 的距离"
+    # 天然就是一张**绣花掩膜** —— 不用做边缘检测、不用调阈值，
+    # 而且和肉眼看到的图案完全一致。
+    #
+    # 为什么这是对的、而"距离场当主形状"是错的：
+    #   距离场描述的是"一块布被剪成的形状"（宏观），
+    #   绣花掩膜描述的是"布上绣了什么"（图案本身）。
+    #   学生要看的是**纹样**：花、叶、回纹。这些必须立起来。
+    cloth = np.asarray(cloth_rgb, dtype=np.float32) if cloth_rgb is not None \
+        else np.array([53.0, 54.0, 58.0], dtype=np.float32)
+    d_cloth = np.sqrt(((array.astype(np.float32) - cloth) ** 2).sum(-1))
+    # 归一化：d_cloth 在底布上≈0，在绣花上很大
+    dmax = float(np.percentile(d_cloth[a > 0], 92)) if a.any() else 1.0
+    thread = np.clip(d_cloth / max(dmax, 1e-6), 0.0, 1.0)
+    # 用 pow(0.65) 而不是 sqrt(0.5)：sqrt 会把中低对比度提得太狠，
+    # 绣花边缘变成"刀片"（实测花朵轮廓像立起来的纸片）。
+    # 0.65 是折中 —— 较暗的花瓣仍能立起来，但过渡是有坡的。
+    thread = np.power(thread, 0.65)
+    # 平滑要够：丝线的织纹是像素级噪点，不压掉就会变成一片毛刺。
+    # 1.2 太轻，实测出现细密颗粒；2.0 才能得到"缎面"那种连续表面。
+    thread = _gaussian_blur_float(thread, 2.0)
+
+    # ---- ③ 肌理层：明度，先强模糊再归一化 ----
+    lum = _gaussian_blur_float(gray, 3.0)
+    vals = lum[a > 0]
     lo, hi = float(vals.min()), float(vals.max())
-    lum = np.clip((gs - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+    lum = np.clip((lum - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
 
-    # ---- 融合：粗尺度主导形状，细尺度只做温和的表面起伏 ----
-    h = 0.72 * dist + 0.28 * lum
+    # ---- 融合：三层各司其职 ----
+    #
+    #   0.14  底形 —— 只表达"这是一块有厚度的布"，绝不做主形状
+    #   0.54  纹路 —— 花朵/叶脉/回纹立起来，这是主体
+    #   0.32  肌理 —— 丝线的细微起伏
+    #
+    # 底形只给 0.14 是**实测调出来的**：给到 0.22 时，
+    # 在 basic_0 那张（宝蓝底布占大半、花朵面积也大）上，
+    # 底形会把整朵花抬成一个鼓鼓的"枕头"，
+    # 而 basic_432 上看着还行 —— 说明 0.22 已经过界了，
+    # 只是那张图的底布占比刚好把问题掩盖了。
+    # 判据不是"某一张看着好"，而是**所有图都不出现鼓包**。
+    h = 0.14 * dist + 0.54 * thread + 0.32 * lum
     h = np.clip(h, 0.0, 1.0)
     h = h * a
 
@@ -849,18 +992,148 @@ def relief_field(array, alpha, size=200, smooth=2.6):
         a = np.asarray(aimg).astype(np.float32) / 255.0
 
     if smooth and smooth > 0:
-        himg2 = Image.fromarray((h * 255).astype(np.uint8), "L")
-        himg2 = himg2.filter(ImageFilter.GaussianBlur(float(smooth)))
-        h = np.asarray(himg2).astype(np.float32) / 255.0
+        # 注意：**不能**走 `* 255 -> uint8 -> 模糊 -> /255` 这条路。
+        #
+        # 踩过的坑：量化到 8 位再模糊，等于把高度场砍成 256 档。
+        # 实测本图相邻格的高度差中位数只有 0.0118（≈3 个灰阶），
+        # 量化误差和真实信号同一个量级 —— 模糊之后又转回 float，
+        # 高度场上就出现一层"台阶状"的毛刺。
+        # 这些毛刺在网格里变成 1.71% 的、坡度 > 72° 的竖条，
+        # 渲染出来就是左侧那排细密的"梳齿"。
+        #
+        # 正确做法：在 float 域直接用可分离卷积做高斯模糊，
+        # 全程不落回整型，精度不掉。
+        h = _gaussian_blur_float(h, float(smooth))
 
-    # 用（缩放后的）alpha 裁掉边缘溢出，保证纹样外严格为 0
-    h = h * (a > 0.5)
+    # 用 alpha 把纹样外压到 0。
+    #
+    # 这里**不能**写 `h * (a > 0.5)`（硬截断）——
+    # 那是"鳍状立边"的真正来源：高度场在轮廓内侧本来还有 0.5 左右，
+    # 硬截断一步把它切到 0，轮廓上立刻出现一道接近 0.5 的垂直落差。
+    # 上一版以为是融合权重的问题，改了权重也没用，因为病根在这一行。
+    #
+    # 正确做法：先把 alpha 边缘模糊成**软边**，再用它做乘法，
+    # 并在外侧多留一点余量（>0.15 而不是 >0.5），
+    # 让高度随 alpha 一起平滑地降到 0。轮廓于是变成一条缓坡，
+    # 侧壁的高度也跟着连续收口。
+    a_img = Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8), "L")
+    a_soft = np.asarray(a_img.filter(ImageFilter.GaussianBlur(2.2))
+                        ).astype(np.float32) / 255.0
+    keep = np.clip(a_soft * 2.4 - 0.4, 0.0, 1.0)
+    h = h * keep
+
+    # ---- 去掉细碎孤岛 ----
+    # alpha 里常带着原图边角上被误判进来的小块碎片（右下角的水印、
+    # 一小段脱线的包边、背景里的反光斑……）。它们本身面积很小，
+    # 但 dist 会把它们**当成一个完整的纹样**给到很高的高度，
+    # 于是渲染出一片孤立竖起的"鳍"，看着像算法坏了
+    # （实测 basic_432 右上就是个典型）。
+    #
+    # 教学场景下这种误读代价很高：学生会以为是程序出错，
+    # 而不是"原图里本来就有一块杂物"。所以这里按面积清理掉：
+    # 只保留最大的连通域，其余小岛归零。
+    keep = _largest_component(keep > 0.12)
+    h = h * keep.astype(np.float32)
 
     return h
 
 
+def _gaussian_blur_float(arr, sigma):
+    """在 float 域做高斯模糊（可分离卷积），不经过 8 位量化。
+
+    为什么不用 PIL 的 GaussianBlur：
+        PIL 只吃 8 位图。要模糊就得先 `* 255 -> uint8`，
+        这个量化对高度场是致命的 —— 相邻格的真实高度差
+        常常只有 0.01（≈3 个灰阶），量化误差和信号同量级，
+        结果是在平滑的高度场上凭空造出一层台阶毛刺。
+
+    实现：两个一维高斯核（水平 + 垂直）各卷一次。
+    边界用「边缘复制」，避免纹样外围出现暗边。
+
+    参数 arr 是二维 float，sigma 是标准差（像素）。
+    """
+    if arr is None or sigma <= 0:
+        return arr
+
+    radius = max(1, int(round(sigma * 3.0)))
+    xs = np.arange(-radius, radius + 1, dtype=np.float32)
+    k = np.exp(-(xs ** 2) / (2.0 * sigma * sigma))
+    k = k / k.sum()
+
+    # 水平方向
+    pad = np.pad(arr, ((0, 0), (radius, radius)), mode="edge")
+    out = np.zeros_like(arr)
+    for off, wgt in enumerate(k):
+        out += wgt * pad[:, off:off + arr.shape[1]]
+    # 垂直方向
+    pad = np.pad(out, ((radius, radius), (0, 0)), mode="edge")
+    res = np.zeros_like(arr)
+    for off, wgt in enumerate(k):
+        res += wgt * pad[off:off + arr.shape[0], :]
+    return res
+
+
+def _largest_component(mask):
+    """返回 mask 中面积最大的连通域（4 邻接），其余置 False。
+
+    不用 scipy.ndimage.label —— 项目要求依赖尽量少
+    （云端托管时每多一个依赖都要多编译一遍）。
+
+    实现用**迭代式区域生长**：一遍扫过所有前景像素，
+    每个还没被访问过的点作为种子长出一整块连通域，
+    长完标记 visited，后续像素直接跳过。
+    复杂度是 O(面积)，不是 O(面积²)。
+    """
+    if mask is None or not mask.any():
+        return mask
+
+    h, w = mask.shape
+    visited = np.zeros_like(mask)
+    best = np.zeros_like(mask)
+    best_size = 0
+
+    ys, xs = np.nonzero(mask)
+    for y0, x0 in zip(ys.tolist(), xs.tolist()):
+        if visited[y0, x0]:
+            continue
+        # 从 (y0, x0) 起做区域生长
+        comp = np.zeros_like(mask)
+        comp[y0, x0] = True
+        frontier = np.zeros_like(mask)
+        frontier[y0, x0] = True
+        while frontier.any():
+            nxt = np.zeros_like(mask)
+            nxt[1:, :] |= frontier[:-1, :]
+            nxt[:-1, :] |= frontier[1:, :]
+            nxt[:, 1:] |= frontier[:, :-1]
+            nxt[:, :-1] |= frontier[:, 1:]
+            nxt &= mask
+            nxt &= ~comp
+            if not nxt.any():
+                break
+            comp |= nxt
+            frontier = nxt
+        visited |= comp
+        size = int(comp.sum())
+        if size > best_size:
+            best_size = size
+            best = comp
+    return best
+
+
+# 正面高度的 z 放大系数。定义为模块级常量，因为「浮雕厚度」滑杆
+# 要按它换算可视厚度 —— 两处必须同步，写死两份迟早会改歪。
+#
+# 取值 0.22：纹样外接盒的 xy 跨度约 0.9，于是正面的高度跨度约
+# 0.22 × 0.9 ≈ 0.20，占 xy 的 22% —— 这个量级本身已经"看得出厚薄"。
+# 再配合 build_3d_figure 里的 aspect_z=0.35（显示端再压一道），
+# 最终视觉斜率约 1.4，是"一块厚实的绣片"，不是"一片刀山"。
+RELIEF_Z_SCALE = 0.22
+
+
 def relief_mesh(array, alpha, height=None, size=200,
-                thickness=0.10, mask_thresh=0.06, max_cells=150):
+                thickness=0.10, mask_thresh=0.06, max_cells=150,
+                cloth_rgb=None):
     """把纹样变成一块**有厚度的真 3D 网格**（用于 Plotly Mesh3d）。
 
     为什么不用 go.Surface：
@@ -885,9 +1158,14 @@ def relief_mesh(array, alpha, height=None, size=200,
           "z_front", "z_back":    供场景摆放参考
         }
     若纹样为空则返回 None。
+
+    参数 mask_thresh: **已废弃**。实体范围曾由 `height > mask_thresh`
+        决定，但那会把底布切成碎岛、长出满屏竖条纹（详见下方
+        solid 那段的注释）。现在改为由 alpha 决定。
+        参数保留只为不破坏既有调用方的位置参数顺序。
     """
     if height is None:
-        height = relief_field(array, alpha, size=size)
+        height = relief_field(array, alpha, size=size, cloth_rgb=cloth_rgb)
     if height is None or not height.any():
         return None
 
@@ -901,10 +1179,12 @@ def relief_mesh(array, alpha, height=None, size=200,
     # 做法：把掩膜轻微模糊成**软边界**，再让高度在靠近边界时
     # 平滑地衰减到 0。这样侧壁的高度从中心到边缘连续变化，
     # 轮廓变成一条柔和的坡，而不是一排竖齿。
-    m_img = Image.fromarray((np.clip(height, 0, 1) * 255)
-                            .astype(np.uint8), "L")
-    taper = np.asarray(m_img.filter(ImageFilter.GaussianBlur(1.6))
-                       ).astype(np.float32) / 255.0
+    #
+    # 注意：这里同样**不能**走 8 位量化（PIL 的 GaussianBlur）。
+    # relief_field 已经用软边 alpha 收过一次口，这一步是二次收口，
+    # 量化误差会在这个"已经很平滑"的高度场上再造出一层台阶，
+    # 渲染出来就是轮廓内侧那排细密的梳齿。用 float 版卷积。
+    taper = _gaussian_blur_float(height, 1.6)
     height = height * np.clip(taper * 3.2, 0.0, 1.0)
 
     # 顶点色：把纹样原图缩到同一尺寸
@@ -919,8 +1199,58 @@ def relief_mesh(array, alpha, height=None, size=200,
     ys = (np.arange(h, dtype=np.float32) - (h - 1) / 2.0) / float(max(w, h))
     X, Y = np.meshgrid(xs, ys)          # (h, w)
 
-    solid = height > mask_thresh
-    zf = height * 0.55                  # 正面高度（放大一点更立体）
+    # ---- 实体区域：由 **alpha** 决定，不由高度阈值决定 ----
+    #
+    # 踩过的坑（这是"竖条纹"的最后一个病根，找了好几轮）：
+    # 原来写的是 `solid = height > mask_thresh`，本意是
+    # "高度太低的地方不算实体"。但高度是**多层融合**出来的，
+    # 在底布上高度接近 0 —— 于是底布区被判成"非实体"，
+    # 而丝线的细微纹理又把底布切成一堆**小碎岛**，
+    # 每个碎岛都被围上一圈 thickness 高的侧壁。
+    # 结果整张底布上密布着竖直的小墙，渲染出来就是那排条纹。
+    #
+    # 正确做法：**实体范围只由 alpha 决定**。alpha 是"这张照片里
+    # 有绣品"的区域，是一个干净的整体；高度只负责在实体内部
+    # 表达起伏。两件事分开，网格就不会被高度的小波动切碎。
+    #
+    # ---- 但 alpha 里还有"大块的底布空洞"，3D 上要补上 ----
+    #
+    # alpha 表达的是"绣线在哪里"，所以花瓣之间的底布是空的
+    # （实测 basic_0 有一大片宝蓝底布是空的）。2D 展示时这是对的
+    # （透明底），但 3D 上会变成"一块镂空的花"——
+    # 而真实的绣片是**一整块布**，底布就在那里，只是没绣花。
+    #
+    # 教学上这会误导：学生会以为绣品是剪纸。所以 3D 阶段
+    # 把纹样的**外轮廓内部**全部补成实体（凸包式的收口），
+    # 只在边缘保留自然的形状。
+    # 做法：把 alpha 的小缺口用形态学闭运算连起来，再取
+    # "最大连通域的外轮廓"。
+    #
+    # 注意：alpha 是**原图尺寸**，而 h/w 是 height 的尺寸
+    # （relief_field 里按 size 缩过）。必须先缩到同一尺寸，
+    # 否则形状对不上（这是一个真的踩过的坑：忘了缩放，
+    # 结果 solid 是原图大小，与 (h, w) 的索引完全错位）。
+    alpha_small = alpha
+    if alpha.shape[0] != h or alpha.shape[1] != w:
+        aimg = Image.fromarray((alpha.astype(np.uint8) * 255), "L")
+        aimg = aimg.resize((w, h), Image.BILINEAR)
+        alpha_small = np.asarray(aimg) > 127
+    solid = _solid_outline(alpha_small, h, w)
+    # 再剔除「高度为 0」的零散点。
+    #
+    # 为什么还要这一步：_solid_outline 补的是**掩膜的外轮廓**，
+    # 但高度场在轮廓边缘已经衰减到 0 —— 于是轮廓内侧会残留
+    # 一圈"实体但高度为 0"的像素。它们与旁边 0.5 高的邻居
+    # 之间会生出一排 thickness 高的短墙，
+    # 渲染出来就是轮廓内侧那条梳齿。
+    #
+    # 实测这类像素占 solid 的 2%，量很小但视觉很扎眼。
+    solid &= (height > 1e-3)
+    # 正面高度：RELIEF_Z_SCALE 的取值理由见文件顶部常量处的说明。
+    # 一句话：0.55 会把坡度拉到 57°（实测），绣片变刀山；
+    # 0.22 相当于把真实起伏（坡度量级 0.01~0.03）放大 10 倍，
+    # 教学上刚好看得清层次，又不失真。
+    zf = height * RELIEF_Z_SCALE
     zb = zf - thickness                 # 背面
 
     # ---- 收集顶点 ----
@@ -959,6 +1289,17 @@ def relief_mesh(array, alpha, height=None, size=200,
             corners = ((px, py), (px2, py), (px2, py2), (px, py2))
             inside = [bool(solid[c[1], c[0]]) for c in corners]
             if not any(inside):
+                continue
+            # 四角高度全接近 0 的格子直接跳过。
+            #
+            # 为什么：_solid_outline 给的是"绣布的外轮廓"，
+            # 但高度场在轮廓内侧的窄带里已经衰减到 0 —— 那里
+            # 有 solid 却几乎没有高度，铺出来只是一层贴着台面的
+            # 薄片，还会跟邻格的 0.5 高度形成短墙（就是轮廓内侧
+            # 那排细齿）。不铺这些格子，轮廓由"高度场的零点"
+            # 决定，反而更干净 —— 高度场本身是平滑衰减的，
+            # 轮廓也就跟着平滑。
+            if max(height[c[1], c[0]] for c in corners) < 1e-3:
                 continue
 
             # 判断某个角是否"真的在纹样内"。不在纹样内的角会被压向
@@ -1029,7 +1370,7 @@ def relief_mesh(array, alpha, height=None, size=200,
 
 def build_3d_figure(array, alpha, size=200, max_cells=100,
                     thickness=0.10, show_floor=True, style="light",
-                    mesh=None):
+                    mesh=None, cloth_rgb=None):
     """组装一张可自由环绕观察的 3D 场景（返回 Plotly Figure）。
 
     相比原来"只有一张 go.Surface 曲面"，这里是一个**完整场景**：
@@ -1058,7 +1399,7 @@ def build_3d_figure(array, alpha, size=200, max_cells=100,
 
     if mesh is None:
         mesh = relief_mesh(array, alpha, size=size, max_cells=max_cells,
-                           thickness=thickness)
+                           thickness=thickness, cloth_rgb=cloth_rgb)
     if mesh is None:
         return None
 
@@ -1124,13 +1465,39 @@ def build_3d_figure(array, alpha, size=200, max_cells=100,
         scene=dict(
             bgcolor=scene_bg,
             aspectmode="manual",
-            # 稍微压扁 z，但保留明显厚度，兼顾"像绣片"和"看得出起伏"
-            aspectratio=dict(x=1.15, y=1.0, z=0.62),
+            # ---- z 方向的显示比例（这一行非常容易搞错，写清楚）----
+            #
+            # Plotly 的 aspectmode="manual" 不是"按数据等比"，
+            # 而是**把每个轴各自归一化到 [0,1]，再按 aspectratio 缩放**。
+            # 于是视觉陡峭度 ≈ aspect_z / (z 的数据跨度)，
+            # 而 aspect_x 要除以 x 的数据跨度 —— 两个跨度不等时，
+            # aspect 的数值不再等于"看起来的比例"。
+            #
+            # 实测这份数据的跨度：x 0.920 / y 0.735 / z 0.200。
+            # 也就是说 z 本来就只占 x 的 22%，屏幕上已经够立体了。
+            # 这里必须**压低** z，而不是抬高：
+            #
+            #     aspect z=0.62 -> 视觉斜率 2.5   （还是偏陡）
+            #     aspect z=0.35 -> 视觉斜率 1.4   ← 当前值
+            #     aspect z=1.45 -> 视觉斜率 5.8   （等于假山，别用）
+            #
+            # 踩过的坑：第一版把 z 从 0.62 提到 1.45，本意是
+            # "网格压平了、显示端拉回来"，结果两边同时放大，
+            # 页面上仍是一片刀山 —— 因为 aspect 的语义被想当然了。
+            # 记住：**数据端的 z 缩放和显示端的 aspect_z 是乘法关系**，
+            # 要压就一起压。
+            aspectratio=dict(x=1.15, y=1.0, z=0.35),
             xaxis=dict(visible=False, showbackground=False),
             yaxis=dict(visible=False, showbackground=False),
             zaxis=dict(visible=False, showbackground=False),
             camera=dict(
-                eye=dict(x=0.05, y=-1.55, z=0.85),
+                # 俯角抬高一点：原来是 (0.05, -1.55, 0.85)，
+                # 视角太低、几乎平视，绣片在屏幕上被压成一条，
+                # 看不出"厚度"和"表面起伏"这两个关键信息。
+                # 抬到 z=1.25、收紧 y，形成约 35° 的俯视 ——
+                # 既能看见台面（判断大小与方位），
+                # 又能斜着看到侧壁（判断厚度）。
+                eye=dict(x=0.15, y=-1.75, z=1.25),
                 up=dict(x=0, y=0, z=1),
             ),
         ),

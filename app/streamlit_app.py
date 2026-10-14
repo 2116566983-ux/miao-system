@@ -250,7 +250,7 @@ def _course_ctx(archive_obj, ann_store_obj=None, csv_df_obj=None, student_id="")
 
 @st.cache_data(show_spinner=False)
 def _build_3d_payload(_arr_bytes, alpha_bytes, shape, size, max_cells,
-                      thickness, theme):
+                      thickness, theme, cloth_rgb=None):
     """在缓存里构建 3D 网格（顶点/面/颜色），避免每次交互都重算。
 
     为什么要缓存：
@@ -275,16 +275,18 @@ def _build_3d_payload(_arr_bytes, alpha_bytes, shape, size, max_cells,
     except Exception:
         return None
 
-    hf = motif_extract.relief_field(arr, alpha, size=size)
+    hf = motif_extract.relief_field(arr, alpha, size=size,
+                                    cloth_rgb=cloth_rgb)
     if hf is None:
         return None
     mesh = motif_extract.relief_mesh(arr, alpha, height=hf, size=size,
                                      max_cells=max_cells,
-                                     thickness=thickness)
+                                     thickness=thickness,
+                                     cloth_rgb=cloth_rgb)
     return mesh
 
 
-def _render_3d_stage(arr, alpha):
+def _render_3d_stage(arr, alpha, cloth_rgb=None):
     """渲染「可自由环绕观察的 3D 立体展示台」。
 
     这是 ④ 提取纹样 的主视图。设计意图（对应教学定位）：
@@ -293,6 +295,10 @@ def _render_3d_stage(arr, alpha):
         把它放进一个有台面、有光照的三维场景里，学生一转就能看到
         线迹的起伏、纹样片的厚度 —— 纹样才真正是一个**实物符号**，
         而不是一张贴在网页上的图片。
+
+    参数 cloth_rgb: extract 判定的底布颜色。传给高度场，
+        用来区分「绣花」与「底布」—— 绣花凸起、底布压平，
+        3D 出来才是图案本身的浮雕，而不是一块鼓鼓的布。
 
     降级策略（很重要，不能因为没装 plotly 就让整页崩掉）：
         1. 有 plotly  → 完整可交互 3D 场景
@@ -320,23 +326,33 @@ def _render_3d_stage(arr, alpha):
 
     c1, c2, c3 = st.columns(3)
     with c1:
+        # 默认从 200 提到 260：轮廓锯齿是这张图最显眼的瑕疵，
+        # 而它跟 size 直接相关（size 越大，轮廓阶梯越细）。
+        # 260 时网格约 2.6 万面，拖动仍然流畅，
+        # 换来的是轮廓明显更干净 —— 这笔账划算。
         size = st.select_slider(
-            "网格精细度", options=[140, 200, 260, 320], value=200,
+            "网格精细度", options=[140, 200, 260, 320], value=260,
             help="越大越细腻，但预览越重。要转动流畅就调小。")
     with c2:
         max_cells = st.select_slider(
-            "网格密度", options=[70, 90, 110, 140], value=90,
+            "网格密度", options=[70, 90, 110, 140], value=110,
             help="决定三角面数量。调小更流畅，调大细节更多。")
     with c3:
-        thickness = st.slider("浮雕厚度", 0.04, 0.22, 0.10, 0.01,
-                              help="纹样片的物理厚度。太薄像纸，太厚像砖。")
+        # 厚度上限跟着 RELIEF_Z_SCALE（0.22）走：
+        # 正面高度跨度约 0.20，厚度若超过它的一半，
+        # 侧面就会比正面还高，看着像一块砖而不是一片绣。
+        thickness = st.slider(
+            "浮雕厚度", 0.03, 0.14, 0.06, 0.01,
+            help="纹样片的物理厚度。太薄像纸，太厚像砖。"
+                 "建议保持在浮雕起伏的 1/3 以内，绣片的厚度本来就很小。")
 
     theme = "dark" if st.get_option("theme.base") == "dark" else "light"
 
     with st.spinner("正在构建 3D 网格…"):
         mesh = _build_3d_payload(
             arr.tobytes(), alpha.tobytes(), arr.shape,
-            int(size), int(max_cells), float(thickness), theme)
+            int(size), int(max_cells), float(thickness), theme,
+            cloth_rgb)
 
     if mesh is None:
         st.warning("3D 网格构建失败（纹样可能过小或为空）。")
@@ -344,7 +360,8 @@ def _render_3d_stage(arr, alpha):
 
     fig = motif_extract.build_3d_figure(
         arr, alpha, size=int(size), max_cells=int(max_cells),
-        thickness=float(thickness), style=theme, mesh=mesh)
+        thickness=float(thickness), style=theme, mesh=mesh,
+        cloth_rgb=cloth_rgb)
 
     if fig is None:
         st.warning("3D 场景组装失败。")
@@ -1571,7 +1588,7 @@ with tab_extract:
                 arr, alpha = res["array"], res["alpha"]
 
                 if view.startswith("④"):
-                    _render_3d_stage(arr, alpha)
+                    _render_3d_stage(arr, alpha, res.get("cloth_rgb"))
 
                 elif view.startswith("②"):
                     # 棋盘底：白线在白底上看不见，必须换背景才判断得准

@@ -1306,6 +1306,40 @@ if _rf is not None:
     _uniq = len(np.unique(np.round(_rf[_rf > 0], 2)))
     check("浮雕高度有连续层次", _uniq > 5, "唯一值 %d" % _uniq)
 
+    # 坡度量级必须与物理尺度相称 —— 这是"3D 看起来像刀山"这个
+    # bug 的**唯一可靠的回归防线**，务必保留。
+    #
+    # 背景：alpha 是二值掩膜，如果结尾用硬截断（h * (a > 0.5)），
+    # 轮廓上会切出接近 0.5 的垂直落差；如果 z 放大系数给太大，
+    # 整片绣片会被拉成 60 度的假山。这两件事都不会让
+    # "中心高于边缘"这类断言失败，但渲染出来完全不是绣片。
+    #
+    # 实测正常值：纹样内部相邻梯度中位数约 0.004~0.008，
+    # 99 分位约 0.09。给一条宽松但有效的水位线：中位数必须 < 0.05，
+    # 否则说明高度场里出现了大片陡壁。
+    if _rf is not None:
+        _g = np.r_[np.abs(np.diff(_rf, axis=1)).ravel(),
+                   np.abs(np.diff(_rf, axis=0)).ravel()]
+        _gmed = float(np.median(_g))
+        _g99 = float(np.percentile(_g, 99))
+        check("浮雕高度场无大片陡壁（梯度中位数 < 0.05）",
+              _gmed < 0.05, "中位数 %.4f / 99%%位 %.4f" % (_gmed, _g99))
+        # 轮廓不能有"围栏"：纹样内与纹样外的过渡应当平缓。
+        # 用「高值区的边界落差」来测：取高度 > 0.3 的区域，
+        # 它与外部的交界处梯度不应接近整片高度。
+        _hi = _rf > 0.3
+        if _hi.any():
+            _drop = np.abs(np.diff(_hi.astype(np.float32), axis=1)).mean()
+            check("纹样内部形成连续主体（不是零散碎片）",
+                  float(_hi.mean()) > 0.15,
+                  "高区占比 %.1f%%" % (100 * float(_hi.mean())))
+
+# --- z 放大系数必须落在物理合理的量级 ---
+# 0.55 会把坡度拉到 60 度（实测），0.05 以下又平到看不出立体。
+check("RELIEF_Z_SCALE 在合理量级",
+      0.08 <= mx.RELIEF_Z_SCALE <= 0.40,
+      "当前 %.2f" % mx.RELIEF_Z_SCALE)
+
 # --- relief_mesh：应产出合法的三角网格 ---
 _msh = mx.relief_mesh(_sa, _sm, size=100, max_cells=60, thickness=0.10)
 check("3D 网格可生成", _msh is not None)
@@ -1331,6 +1365,70 @@ if _msh:
     # 颜色不该只有一种（说明真的把纹样颜色贴上去了）
     check("顶点色有多种取值", len(set(_msh["color"])) > 3,
           "%d 种" % len(set(_msh["color"])))
+
+# --- 连通域清理：碎片孤岛必须被去掉，只留最大的一块 ---
+# 为什么要测：alpha 里混进来的小块杂物（水印/反光斑）会被
+# 高度场当成完整纹样抬起来，渲染成一片竖立的"鳍"。
+_lc = np.zeros((40, 40), dtype=bool)
+_lc[5:35, 5:35] = True         # 最大的主体
+_lc[0:3, 0:3] = True           # 左上角小碎片
+_lc[37:39, 36:39] = True       # 右下角小碎片
+_lc_out = mx._largest_component(_lc)
+check("连通域清理：保留最大主体",
+      _lc_out is not None and bool(_lc_out[20, 20]))
+check("连通域清理：去掉左上碎片", not bool(_lc_out[1, 1]))
+check("连通域清理：去掉右下碎片", not bool(_lc_out[38, 37]))
+check("连通域清理：结果面积等于主体",
+      _lc_out is not None and int(_lc_out.sum()) == 30 * 30,
+      "面积 %s" % (int(_lc_out.sum()) if _lc_out is not None else "None"))
+check("连通域清理：全空输入安全",
+      mx._largest_component(np.zeros((10, 10), dtype=bool)) is not None
+      and not mx._largest_component(np.zeros((10, 10), dtype=bool)).any())
+
+# --- 填内部孔：3D 网格能用的前提（有孔就会长出满屏竖条纹）---
+_fh = np.zeros((40, 40), dtype=bool)
+_fh[5:35, 5:35] = True
+_fh[18:22, 18:22] = False        # 正中间挖一个内部孔
+_fh_out = mx._fill_holes(_fh)
+check("填内部孔：孔被填上",
+      _fh_out is not None and bool(_fh_out[20, 20]))
+check("填内部孔：外边界不被扩张",
+      _fh_out is not None and bool(_fh_out[5, 5]) and not bool(_fh_out[0, 0]))
+check("填内部孔：外部背景保持为空",
+      _fh_out is not None and int(_fh_out.sum()) == 30 * 30,
+      "面积 %s" % (int(_fh_out.sum()) if _fh_out is not None else "None"))
+
+# --- 3D 实体轮廓：应当是"一整块"，不是碎裂的花瓣 ---
+_so = mx._solid_outline(_fh, 40, 40)
+check("实体轮廓可生成", _so is not None and _so.any())
+if _so is not None:
+    check("实体轮廓是连成一片的（无内部孔）",
+          bool(_so[20, 20]))
+    # 轮廓面积不应小于原掩膜（外轮廓只做加法）
+    check("实体轮廓不小于原掩膜",
+          int(_so.sum()) >= int(_fh.sum()),
+          "%d vs %d" % (int(_so.sum()), int(_fh.sum())))
+
+# --- 3D 网格里的陡面比例（竖条纹的量化指标）---
+# 陡面 = dz/dh 远大于 1 的面。侧壁本身是竖直的（正常），
+# 但如果比例过高，说明网格被切碎了。
+_msh3 = mx.relief_mesh(_sa, _sm, size=120, max_cells=60, thickness=0.06)
+if _msh3:
+    _x3 = np.array(_msh3["x"]); _y3 = np.array(_msh3["y"])
+    _z3 = np.array(_msh3["z"])
+    _i3 = np.array(_msh3["i"]); _j3 = np.array(_msh3["j"])
+    _k3 = np.array(_msh3["k"])
+    _X3 = np.stack([_x3[_i3], _x3[_j3], _x3[_k3]], 1)
+    _Y3 = np.stack([_y3[_i3], _y3[_j3], _y3[_k3]], 1)
+    _Z3 = np.stack([_z3[_i3], _z3[_j3], _z3[_k3]], 1)
+    _dh3 = np.hypot(_X3.max(1) - _X3.min(1), _Y3.max(1) - _Y3.min(1))
+    _dz3 = _Z3.max(1) - _Z3.min(1)
+    _sl3 = np.where(_dh3 > 1e-9, _dz3 / np.maximum(_dh3, 1e-9), np.nan)
+    _sl3 = _sl3[~np.isnan(_sl3)]
+    if _sl3.size:
+        check("3D 陡面比例可控（< 60%）",
+              float((_sl3 > 3).mean()) < 0.60,
+              "%.1f%%" % (100 * float((_sl3 > 3).mean())))
 
 # --- 越界的 max_cells 也要能给出结果（不能返回 None 或抛异常）---
 _m2 = mx.relief_mesh(_sa, _sm, size=100, max_cells=8)

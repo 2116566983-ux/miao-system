@@ -169,8 +169,11 @@ def main():
         return 1
 
     arr, alpha = r["array"], r["alpha"]
-    hf = relief_field(arr, alpha, size=200)
-    mesh = relief_mesh(arr, alpha, height=hf, max_cells=110)
+    # 传 cloth_rgb：让高度场能区分「绣花」与「底布」，
+    # 这样离线预览和线上 Plotly 看到的是同一套高度场。
+    hf = relief_field(arr, alpha, size=200, cloth_rgb=r.get("cloth_rgb"))
+    mesh = relief_mesh(arr, alpha, height=hf, max_cells=110,
+                       cloth_rgb=r.get("cloth_rgb"))
     print("顶点 %d，三角面 %d" % (len(mesh["x"]), len(mesh["i"])))
 
     # 三个角度各渲染一张，方便判断厚度是否可读
