@@ -32,6 +32,16 @@ nohup.out
 # ---- 作品与标注的运行时数据 ----
 metadata/works.csv
 metadata/works_review.csv
+metadata/works_peer_review.csv
+
+# ---- 课堂用的缩略图集 ----
+# data/images/ 是**故意不忽略**的（所以这里不写它）。
+# 1000 张原图 155MB 放不进仓库，但课上没图就用不了，
+# 所以用 tools/build_thumbs.py 压成约 51MB 的缩略图随仓库发布，
+# 让云端部署的学生检索页直接有图可看。
+# 换一批数据时重新跑：
+#     python tools/build_thumbs.py --src <原图目录>
+data/images/*.tmp
 
 # ---- 需要凭据的探测脚本（依赖本机/服务器环境，不进公开仓库）----
 tools/probe_server.py

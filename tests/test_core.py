@@ -70,9 +70,30 @@ except Exception:
     SRC = ""
 HAS_REAL_IMAGES = bool(SRC and os.path.isdir(SRC))
 
+# 关键：这一段的「可标注数」「仅原始图组数」两个断言**依赖图片的真实尺寸**，
+# 因为 build_metadata.py 会按「短边 < 100px 则不可标注」来判定。
+#
+# 而 find_image_root() 现在可能返回两种目录：
+#   · data/images/  —— 随仓库发布的课堂缩略图（长边 ≤560）
+#   · 原始高清图目录 —— 开发机上的原图
+# 两者尺寸不同，算出来的可标注数就不同。已实测确认差异只有一处：
+#   basic_828.jpg 原 2409x362（短边 362，可标注）
+#                缩 560x84 （短边  84，不可标注）—— 极端宽幅图缩完短边必然变小
+# 所以这里按「量的是哪一批图」取对应的期望值，
+# 而不是写死一个数字然后默默接受漂移。
+_NORMALIZED = os.path.normpath(SRC).replace("\\", "/")
+_IS_THUMBS = _NORMALIZED.endswith("/data/images")
+
 if not HAS_REAL_IMAGES:
     skip("依赖真实图片的测试段", "未找到图片目录（不影响其他测试）")
 
+if HAS_REAL_IMAGES:
+    print("  图片目录：%s" % SRC)
+    print("  判定：%s" % ("课堂缩略图集" if _IS_THUMBS else "原始高清图"))
+    # 缩略图集因为 basic_828.jpg 短边降到 84px，少一张可标注；
+    # 连带「仅原始图」里那一组不再是「全部可标注」，所以 241 → 240。
+    EXPECT_MARKABLE = 730 if _IS_THUMBS else 731
+    EXPECT_ONLY_BASIC = 240 if _IS_THUMBS else 241
 
 if HAS_REAL_IMAGES:
     sys.argv = ["build_metadata.py", "--src", SRC, "--out", CSV1]
@@ -116,7 +137,8 @@ if HAS_REAL_IMAGES:
 
     # 质量判定
     markable = sum(1 for r in rows if r["markable"] == "是")
-    check("可标注数为 731", markable == 731, "实际 %d" % markable)
+    check("可标注数为 %d" % EXPECT_MARKABLE, markable == EXPECT_MARKABLE,
+          "实际 %d" % markable)
     check("拼贴图全部不可标注",
           all(r["markable"] == "否" for r in rows if r["variant"] == "mixup"))
     check("尺寸过小的图不可标注",
@@ -387,9 +409,10 @@ if os.path.exists(CSV1):
     # 每组只出现一次
     check("去重后无重复分组", allv["group_id"].duplicated().sum() == 0)
 
-    # 仅 basic：241 组
+    # 仅 basic：缩略图集 240 组 / 原图 241 组（差在 basic_828.jpg，见本节开头说明）
     onlyb = filter_and_dedupe(df, ["basic"])
-    check("仅原始图 241 组", len(onlyb) == 241, "实际 %d" % len(onlyb))
+    check("仅原始图 %d 组" % EXPECT_ONLY_BASIC,
+          len(onlyb) == EXPECT_ONLY_BASIC, "实际 %d" % len(onlyb))
     check("仅原始图时全部为 basic", set(onlyb["variant"]) == {"basic"})
 
     # 代表图优先取源图
