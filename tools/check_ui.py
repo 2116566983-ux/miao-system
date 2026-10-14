@@ -197,7 +197,7 @@ def main():
             print("  [warn] %s" % str(w.value)[:200])
         print()
 
-    # ---- 控件盘点，确认四个标签页都渲染出来了 ----
+    # ---- 控件盘点，确认各标签页都渲染出来了 ----
     print("控件盘点：")
     print("  标签页    %d" % len(at.tabs))
     print("  按钮      %d" % len(at.button))
@@ -209,12 +209,81 @@ def main():
     # 注：AppTest 在本版本没有 progress 访问器，进度条用 metric 间接确认
     print()
 
-    # 六个标签页：检索 / 创作 / 作品 / 提取 / 标注 / 知识图谱
-    if len(at.tabs) < 6:
+    # 八个标签页：课程导航 / 检索 / 创作 / 作品 / 展示墙 / 提取 / 标注 / 知识图谱
+    #
+    # 为什么要写成「>= 8」而不是「== 8」：
+    # 课程项目会持续加页（例如以后可能加「课堂讨论」），断言等号会让
+    # 每次加页都得改测试。这里真正要守住的是「已有的页不能掉」，
+    # 所以用下限；具体哪几页存在，由下面几条按内容的关键词断言来保证。
+    if len(at.tabs) < 8:
         ok = False
-        print("  [FAIL] 标签页少于 6 个，新增的「知识图谱」页可能没渲染出来")
+        print("  [FAIL] 标签页少于 8 个，「课程导航」或「作品展示墙」可能没渲染出来")
     else:
-        print("  [PASS] 六个标签页均已渲染")
+        print("  [PASS] 八个标签页均已渲染（当前 %d 个）" % len(at.tabs))
+
+    # ---- ⓪ 课程导航：单元与分层说明确实渲染出来了 ----
+    #
+    # 说明：AppTest 的 at.tabs 只能数出页签个数，读不到页签标题文本，
+    # 所以「课程导航页里到底有没有内容」只能回到 markdown 正文找关键词。
+    # 缺了这几个词，就说明 course.UNITS 被改坏了、或页面里的循环没跑全。
+    #
+    # 关键词怎么选的（对着 app/streamlit_app.py 的 ⓪ 页实现核对过）：
+    #   ·「课时」   —— 出现在单元小标题「第 N 单元 · X 课时（理论…）」里，
+    #                  四个单元循环渲染，所以出现次数 = 单元数
+    #   ·「基础层」 —— 每个单元都印「要做的事（基础层）」
+    #   ·「单元已完成」—— 进度行「课程进度：N / 4 单元已完成」
+    # 这里**不**断言「拓展层」：它只在选中拓展层时才渲染（默认基础层，
+    # 拓展要求收在 expander 里），断言它会误报失败。
+    # _md_all 在下面的「标注进度区」还要复用，所以在这里先算出来。
+    _md_all = " ".join(str(getattr(el, "value", "") or "")
+                       for el in getattr(at, "markdown", []))
+    _course_keys = ["课时", "基础层", "单元已完成"]
+    _miss = [k for k in _course_keys if k not in _md_all]
+    if _miss:
+        ok = False
+        print("  [FAIL] 课程导航页内容不完整，缺少关键词：%s" % "、".join(_miss))
+    else:
+        print("  [PASS] 课程导航页已渲染（含课时、基础层任务与进度行）")
+
+    # 四个单元都该渲染出标题。数「单元 ·」的出现次数 —— 比数「课时」
+    # 更准，因为「课时」在顶部总述里也出现一次（会多算 1）。
+    _n_unit = _md_all.count("单元　·　")
+    if _n_unit < 4:
+        ok = False
+        print("  [FAIL] 只渲染出 %d 个单元标题，应该有 4 个" % _n_unit)
+    else:
+        print("  [PASS] 四个教学单元均已渲染")
+
+    # ---- ⓪ 课程导航：学号输入框（分层与进度都挂在它上面）----
+    _sid_boxes = [t for t in at.text_input
+                  if "学号" in (getattr(t, "label", "") or "")]
+    if not _sid_boxes:
+        ok = False
+        print("  [FAIL] 找不到「学号」输入框，课程进度无法按人统计")
+    else:
+        print("  [PASS] 学号输入框已渲染")
+
+    # ---- ⓪ 课程导航：分层单选（基础层 / 拓展层）----
+    _track_radios = [r for r in at.radio
+                     if "学习层次" in (getattr(r, "label", "") or "")]
+    if not _track_radios:
+        ok = False
+        print("  [FAIL] 找不到「选择你的学习层次」单选，课程导航的分层入口丢了")
+    else:
+        print("  [PASS] 分层选择已渲染（全页单选合计 %d 组）" % len(at.radio))
+
+    # ---- ⑦ 作品展示墙：筛选与排序控件 ----
+    #
+    # 展示墙的核心交互是三个控件（方式下拉 / 只看没评过的多选 / 排序下拉）。
+    # 但 at.selectbox 是**全页合计**，没法按页拆分，所以这里只在总数
+    # 明显偏少时报错 —— 宁可漏报也不要误判，误判会让别人不再信这个脚本。
+    if len(at.selectbox) < 6:
+        ok = False
+        print("  [FAIL] 下拉框总数偏少（%d），展示墙的筛选/排序可能没渲染"
+              % len(at.selectbox))
+    else:
+        print("  [PASS] 展示墙筛选与排序控件已渲染（下拉框合计 %d 个）"
+              % len(at.selectbox))
 
     # 提取页应有「开始提取纹样」按钮
     ex_btns = [b for b in at.button if "开始提取纹样" in (b.label or "")]
@@ -244,8 +313,7 @@ def main():
     # 已从「四张大数字卡」改为「一行紧凑状态文本」（见 streamlit_app.py
     # 里的注释：仪表盘式布局会把注意力从纹样上拉走）。
     # 所以改为在 markdown 文本里找「已标注 / 完成度」这两个关键词。
-    _md_all = " ".join(str(getattr(el, "value", "") or "")
-                       for el in getattr(at, "markdown", []))
+    # _md_all 已在上面「课程导航」那段算好并复用。
     if "已标注" in _md_all and "完成度" in _md_all:
         print("  [PASS] 标注进度区已渲染（进度状态行）")
     elif len(at.metric) >= 1:

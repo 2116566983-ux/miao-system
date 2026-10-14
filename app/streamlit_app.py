@@ -64,10 +64,25 @@ import motif_extract
 # 图数据库教学：节点/关系定义、预设查询、无数据库时的内存图等价实现
 import graph_teach
 
+# 标注：⓪ 课程导航 与 ⑤ 标注纹样 都要用，所以提到模块级导入
+from annotation_store import (
+    AnnotationStore, ANNOTATION_FIELDS, REQUIRED_FIELDS,
+    VALUE_OPTIONS, FIELD_HINTS,
+)
+
+# 课程结构：4 个教学单元、32 课时、分层任务（对齐技术路线方案 §5 §6）。
+# 界面只负责渲染，课程结构变了只改 course.py。
+import course
+
+# HTML 转义：凡是要把用户输入（设计说明、互评）拼进 unsafe_allow_html
+# 的地方都必须先转义，否则学生写个 <script> 就能改页面结构。
+from html import escape as _esc
+
 PROJECT_DIR = os.path.dirname(APP_DIR)
 CSV_PATH = os.path.join(PROJECT_DIR, "metadata", "images.csv")
 WORK_CSV = os.path.join(PROJECT_DIR, "metadata", "works.csv")
 GEN_DIR = os.path.join(PROJECT_DIR, "data", "generated")
+MOTIF_DIR = os.path.join(PROJECT_DIR, "data", "motifs")
 UPLOAD_DIR = os.path.join(PROJECT_DIR, "data", "uploads")
 WF_DIR = os.path.join(PROJECT_DIR, "workflows")
 
@@ -175,6 +190,62 @@ def _b64_thumb(path, box=420, quality=82):
         return base64.b64encode(buf.getvalue()).decode("ascii")
     except Exception:
         return ""
+
+
+def _course_ctx(archive_obj, ann_store_obj=None, csv_df_obj=None, student_id=""):
+    """汇总课程进度要用到的实际数据，交给 course.py 去算。
+
+    为什么在这里聚合、而不是让 course.py 自己读文件：
+      course.py 保持**纯计算、无副作用**，才能被单元测试直接调用
+      （传一个 dict 进去断言返回值）。读取路径依赖、缓存策略、
+      数据库降级这类事属于界面层，不该渗进课程定义里。
+    """
+    ctx = {
+        "annotated_groups": 0,
+        "total_groups": 0,
+        "extracted_count": 0,
+        "works": [],
+        "peer_reviews_given": 0,
+        "student_id": student_id or "",
+    }
+
+    # 总组数：优先取本地清单（它始终加载）
+    try:
+        if csv_df_obj is not None and "group_id" in csv_df_obj.columns:
+            ctx["total_groups"] = int(csv_df_obj["group_id"].nunique())
+    except Exception:
+        pass
+
+    # 已标注组数（progress 需要总数参数，所以放在总数算完之后）
+    try:
+        if ann_store_obj is not None:
+            prog = ann_store_obj.progress(ctx.get("total_groups") or 0)
+            ctx["annotated_groups"] = prog.get("annotated", 0)
+    except Exception:
+        pass
+
+    # 提取过的纹样数：数 motifs 目录里的正式产出（下划线开头的是调试图）
+    try:
+        if os.path.isdir(MOTIF_DIR):
+            ctx["extracted_count"] = len(
+                [f for f in os.listdir(MOTIF_DIR)
+                 if f.endswith(".png") and not f.startswith("_")])
+    except Exception:
+        pass
+
+    # 作品与互评
+    try:
+        ctx["works"] = archive_obj.load() if archive_obj is not None else []
+    except Exception:
+        ctx["works"] = []
+    try:
+        if archive_obj is not None:
+            stats = archive_obj.peer_review_stats(student_id or "")
+            ctx["peer_reviews_given"] = stats.get("given", 0)
+    except Exception:
+        pass
+
+    return ctx
 
 
 @st.cache_data(show_spinner=False)
@@ -310,6 +381,9 @@ graph = get_graph(
 comfy = get_comfy(os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188"))
 apiimg = get_api_image()
 archive = WorkArchive(WORK_CSV, GEN_DIR)
+# 标注存储提到模块级：⓪ 课程导航页要读标注进度，⑤ 标注页要读写，
+# 两处共用一个实例，避免各建一份导致状态不一致。
+ann_store = AnnotationStore()
 
 DB_OK = graph.available
 COMFY_OK = comfy.available
@@ -388,11 +462,113 @@ if not DEFAULT_IMAGE_ROOT:
     )
 
 # ==================================================================
-# 三个工作区
+# 八个标签页：⓪ 课程导航 + 六个工具页 + ⑦ 作品展示墙
 # ==================================================================
-tab_search, tab_create, tab_works, tab_extract, tab_annotate, tab_graph = st.tabs(
-    ["① 检索纹样", "② AI 重组创作", "③ 我的作品",
-     "④ 提取纹样", "⑤ 标注纹样", "⑥ 知识图谱"])
+# 为什么要在最前面加一个「课程导航」：
+#   原来六个标签页并排，学生看到的是**六个工具**，不是**一门课**。
+#   他不知道这门课有几个单元、现在讲到哪、自己该做哪一步。
+#   ⓪ 页把工具挂回课程结构上（在 app/course.py 里定义），
+#   学生打开先看到「第几单元、要做哪几步、做完没」。
+#
+# 为什么 ③ 和 ⑦ 分开：
+#   ③ 是**自己的作品台**（填设计说明、看教师审核）；
+#   ⑦ 是**全班展示墙**（浏览同学作品、写互评）。
+#   合成一页会让「我的」和「大家的」混在一起，
+#   而第四单元的核心动作恰恰是「跳出自己的作品去看别人的」。
+tab_course, tab_search, tab_create, tab_works, tab_gallery, \
+    tab_extract, tab_annotate, tab_graph = st.tabs(
+    ["⓪ 课程导航", "① 检索纹样", "② AI 重组创作", "③ 我的作品",
+     "⑦ 作品展示墙", "④ 提取纹样", "⑤ 标注纹样", "⑥ 知识图谱"])
+
+
+# ------------------------------------------------------------------
+# ⓪ 课程导航
+# ------------------------------------------------------------------
+with tab_course:
+    # 当前学生的学号：⓪ 页也提供输入口，因为这是学生进系统
+    # 最先看到的一页 —— 不该逼他先去 ② 页填学号。
+    st.markdown(
+        '<div class="note">这门课共 <b>%d 课时</b>（理论 %d + 实践 %d），'
+        '分 <b>%d 个教学单元</b>。下面按顺序走完即可完成全部任务；'
+        '每一步都能点进对应的操作页面。</div>'
+        % (course.TOTAL_HOURS, course.THEORY_HOURS, course.PRACTICE_HOURS,
+           len(course.UNITS)),
+        unsafe_allow_html=True)
+
+    st.write("")
+    _who_l, _who_r = st.columns([2, 3])
+    with _who_l:
+        course_sid = st.text_input(
+            "你的学号 / 姓名（用于记录进度与作品归属）",
+            value=st.session_state.get("student_id", ""),
+            key="course_sid",
+            placeholder="例如 S2024001")
+        if course_sid != st.session_state.get("student_id", ""):
+            st.session_state["student_id"] = course_sid
+    with _who_r:
+        # 分层选择：方案 §5 要求区分基础层与拓展层
+        course_track = st.radio(
+            "选择你的学习层次",
+            [course.TRACKS[course.TRACK_BASIC]["label"],
+             course.TRACKS[course.TRACK_ADVANCED]["label"]],
+            horizontal=True, key="course_track")
+        _is_adv = course_track == course.TRACKS[course.TRACK_ADVANCED]["label"]
+        st.caption(course.TRACKS[
+            course.TRACK_ADVANCED if _is_adv else course.TRACK_BASIC]["desc"])
+
+    # ---- 汇总进度 ----
+    _ctx = _course_ctx(archive, ann_store, csv_df, st.session_state.get("student_id", ""))
+    _prog = course.overall_progress(_ctx)
+
+    st.write("")
+    _pct_slot = st.container()
+    with _pct_slot:
+        st.markdown(
+            '<div class="src">课程进度：<b>%d</b> / <b>%d</b> 单元已完成'
+            '　｜　已标注 <b>%s</b> 组　｜　作品 <b>%d</b> 件</div>'
+            % (_prog["units_done"], _prog["units_total"],
+               format(_ctx["annotated_groups"], ","),
+               len(_ctx["works"])),
+            unsafe_allow_html=True)
+        st.progress(min(_prog["ratio"], 1.0))
+
+    st.divider()
+
+    # ---- 四个单元 ----
+    for _u, _r in zip(course.UNITS, _prog["rows"]):
+        _mark = "done" if _r["done"] else "note"
+        _badge = tag("已完成", "on") if _r["done"] else tag("进行中", "off")
+        st.markdown(
+            '<div class="sec-no">第 %d 单元　·　%d 课时（理论 %d / 实践 %d）</div>'
+            % (_u["no"], _u["hours"], _u["theory"], _u["practice"]),
+            unsafe_allow_html=True)
+        st.markdown("### %s　%s" % (_u["title"], _badge),
+                    unsafe_allow_html=True)
+        st.markdown("**%s**" % _u["theme"], unsafe_allow_html=True)
+        st.markdown(
+            '<div class="%s">%s</div>' % (_mark, _r["label"]),
+            unsafe_allow_html=True)
+
+        _c1, _c2 = st.columns([3, 2])
+        with _c1:
+            st.markdown("**要做的事（基础层）**")
+            for _i, _s in enumerate(_u["steps"], 1):
+                st.markdown("%d. %s" % (_i, _s))
+        with _c2:
+            st.markdown("**本单元产出**")
+            for _o in _u["outputs"]:
+                st.markdown("- %s" % _o)
+            st.markdown("**用到哪些页面**")
+            for _t in _u["tabs"]:
+                st.markdown("- %s" % _t)
+
+        if _is_adv:
+            with st.expander("拓展层：本单元额外要求（计算机/数据专业）"):
+                for _i, _a in enumerate(_u["advanced"], 1):
+                    st.markdown("%d. %s" % (_i, _a))
+
+        st.caption("配套实验指导书：experiments/%s" % _u["exp_file"])
+        st.divider()
 
 
 # ------------------------------------------------------------------
@@ -921,28 +1097,50 @@ with tab_create:
 # ③ 作品
 # ------------------------------------------------------------------
 with tab_works:
+    _mine_sid = st.session_state.get("student_id", "").strip()
     st.markdown(
-        '<div class="done">每件作品都记录了原始素材、提示词、随机种子和生成时间，'
-        '可作为课程过程性材料。</div>', unsafe_allow_html=True)
+        '<div class="done">这是<b>你自己</b>的作品台。每件作品都记录了原始素材、'
+        '提示词、随机种子和生成时间，可作为课程过程性材料。</div>',
+        unsafe_allow_html=True)
+    st.markdown(
+        '<div class="note">第四单元要求为作品补上<b>设计说明</b>——'
+        '写清你改了什么、为什么这么改。生成参数是机器记的，'
+        '设计思路只有你能写。填完会自动出现在展示墙上。</div>',
+        unsafe_allow_html=True)
     st.write("")
 
     works = archive.load()
     if not works:
-        st.info("还没有作品记录。到「② AI 重组创作」生成第一件作品。")
+        st.markdown(
+            '<div class="note">还没有作品记录。到 <b>② AI 重组创作</b> '
+            '生成第一件作品，或到 <b>⓪ 课程导航</b> 看第三单元怎么开始。</div>',
+            unsafe_allow_html=True)
     else:
-        author = st.text_input("按学号筛选（留空看全部）")
+        _f1, _f2 = st.columns([2, 2])
+        with _f1:
+            author = st.text_input("按学号筛选（留空看全部）",
+                                   value=_mine_sid, key="works_filter")
+        with _f2:
+            _only_unnoted = st.checkbox("只看还没写设计说明的", value=False,
+                                        key="works_only_unnoted")
         rows_w = [w for w in works if not author.strip()
                   or author.strip() in (w.get("student_id") or "")]
+        if _only_unnoted:
+            rows_w = [w for w in rows_w
+                      if not (w.get("design_note") or "").strip()]
 
         # 作品缩略图与①检索页共用 .thumb 那只定高盒子。
         # 之前这里直接 st.image(width="stretch")：生成图多为竖构图，
         # 撑满栏宽后会拉成一根很高的柱子，右侧空出一大片灰底，
         # 一条记录就占掉大半屏，翻两下就不知道自己在看第几件了。
         # 定高 + contain 之后，每件作品占的纵向空间一致，能横向扫读。
+        _pr_stats = archive.peer_review_stats(author.strip())
         st.markdown(
-            '<div class="src">共 <b>%d</b> 件作品%s</div>'
+            '<div class="src">共 <b>%d</b> 件作品%s　｜　'
+            '你已互评 <b>%d</b> 件</div>'
             % (len(rows_w),
-               "（已按学号筛选）" if author.strip() else ""),
+               "（已按条件筛选）" if (author.strip() or _only_unnoted) else "",
+               _pr_stats["given"]),
             unsafe_allow_html=True)
 
         for w in reversed(rows_w):
@@ -964,16 +1162,66 @@ with tab_works:
                                     '作品文件未找到</span></div>',
                                     unsafe_allow_html=True)
                 with c2:
-                    st.markdown(f"**{w.get('work_id')}** · {w.get('student_id')}")
+                    _wid = w.get("work_id") or ""
+                    st.markdown(f"**{_wid}** · {w.get('student_id') or '未署名'}")
                     st.caption(
                         "模式：%s ｜ 强度：%s ｜ 种子：%s ｜ 时间：%s"
                         % (w.get("mode"), w.get("denoise"),
                            w.get("seed"), w.get("created_at")))
                     st.caption("来源素材：%s" % (w.get("source_images") or "—"))
                     st.caption("提示词：%s" % (w.get("prompt") or "")[:160])
+
+                    # ---- 设计说明 ----
+                    _dn = (w.get("design_note") or "").strip()
+                    if _dn:
+                        st.markdown(
+                            '<div class="done"><b>设计说明</b><br>%s</div>'
+                            % _esc(_dn), unsafe_allow_html=True)
+                    else:
+                        st.markdown(
+                            '<div class="caution">还没写设计说明。'
+                            '展开下面补填（第四单元要求）。</div>',
+                            unsafe_allow_html=True)
+
+                    with st.expander("填写 / 修改设计说明"):
+                        _note_val = st.text_area(
+                            "写清：你改了什么、为什么这么改、保留了什么苗绣特征",
+                            value=_dn, height=110,
+                            key="dn_%s" % _wid,
+                            placeholder="例如：把底布换成深靛蓝以贴近土布本色，"
+                                        "保留花枝的对称骨架，只加强了花瓣的层次。")
+                        if st.button("保存设计说明", key="dn_save_%s" % _wid):
+                            if not author.strip():
+                                st.warning("请先在上面填入你的学号，"
+                                           "设计说明要记名才有效。")
+                            elif archive.update_design_note(_wid, _note_val.strip()):
+                                st.success("已保存")
+                                st.rerun()
+                            else:
+                                st.error("保存失败：没找到这件作品")
+
+                    # ---- 收到的互评（第四单元）----
+                    _prs = archive.load_peer_reviews(_wid)
+                    if _prs:
+                        with st.expander("同学互评（%d 条）" % len(_prs)):
+                            for _p in _prs:
+                                st.markdown(
+                                    "**%s**　%s" % (_p.get("reviewer_name")
+                                                    or _p.get("reviewer_id") or "匿名",
+                                                    _p.get("created_at") or ""))
+                                st.markdown("优点：%s" % (_p.get("merit") or "—"))
+                                st.markdown("建议：%s" % (_p.get("suggestion") or "—"))
+                                st.divider()
+
                     status = w.get("review_status") or "待审核"
-                    st.caption("审核状态：%s" % status
-                               + (f" · {w.get('review_note')}" if w.get("review_note") else ""))
+                    _status_cls = ("done" if status == "通过"
+                                   else "caution" if status == "需修改" else "src")
+                    st.markdown(
+                        '<div class="%s">教师审核：%s%s</div>'
+                        % (_status_cls, _esc(str(status)),
+                           (" · " + _esc(str(w.get("review_note"))))
+                           if w.get("review_note") else ""),
+                        unsafe_allow_html=True)
                 st.divider()
 
         with st.expander("导出全部作品记录"):
@@ -1018,6 +1266,179 @@ with tab_works:
                 nw = graph.run("MATCH (w:GeneratedWork) RETURN count(w) AS n")
                 if nw:
                     st.metric("图库中的作品", nw[0].get("n", 0))
+
+# ------------------------------------------------------------------
+# ⑦ 作品展示墙
+# ------------------------------------------------------------------
+# 与 ③ 我的作品 的区别：
+#   ③ 是个人视角（我的作品、我填说明、教师对我的审核）
+#   ⑦ 是班级视角（全班作品、我给别人写互评）
+# 方案第四单元要求「完成作品展示、互评和过程归档」，
+# 互评必须发生在**别人的**作品上，所以单独一页。
+with tab_gallery:
+    st.markdown(
+        '<div class="done">全班作品展示墙。浏览同学的作品，'
+        '为至少 <b>2 件</b> 写下互评 —— 先说看到的优点，再给一条具体建议。'
+        '</div>', unsafe_allow_html=True)
+    st.write("")
+
+    _all_works = archive.load()
+    _gallery = [w for w in _all_works if (w.get("output_path") or "").strip()]
+    # 只展示有图的（文件确实存在的），否则展示墙全是破图
+    _gallery = [w for w in _gallery
+                if any(os.path.exists(p)
+                       for p in (w.get("output_path") or "").split(",") if p)]
+
+    if not _gallery:
+        st.markdown(
+            '<div class="note">展示墙还没有作品。等第一位同学在 '
+            '<b>② AI 重组创作</b> 生成作品后，这里会自动出现。</div>',
+            unsafe_allow_html=True)
+    else:
+        _pr_all = archive.peer_review_stats()
+        _by_work = _pr_all.get("by_work", {})
+        _reviewer = st.session_state.get("student_id", "").strip()
+
+        # ---- 筛选 ----
+        _g1, _g2, _g3 = st.columns([2, 2, 3])
+        with _g1:
+            _g_mode = st.selectbox(
+                "创作模式",
+                ["全部", "单图重组", "多纹样组合"],
+                key="gal_mode")
+        with _g2:
+            _g_only_unreviewed = st.checkbox("只看我还没评的", value=False,
+                                             key="gal_unrev")
+        with _g3:
+            _g_sort = st.radio("排序", ["最新在前", "互评最多"],
+                               horizontal=True, key="gal_sort")
+
+        _rows = list(_gallery)
+        if _g_mode == "单图重组":
+            _rows = [w for w in _rows if (w.get("mode") or "") == "img2img"]
+        elif _g_mode == "多纹样组合":
+            _rows = [w for w in _rows if (w.get("mode") or "") == "multi_motif"]
+
+        _my_reviewed = set()
+        if _reviewer:
+            _my_reviewed = {r.get("work_id")
+                            for r in archive.load_peer_reviews()
+                            if r.get("reviewer_id") == _reviewer}
+        if _g_only_unreviewed and _reviewer:
+            _rows = [w for w in _rows if w.get("work_id") not in _my_reviewed]
+
+        if _g_sort == "互评最多":
+            _rows.sort(key=lambda w: _by_work.get(w.get("work_id"), 0),
+                       reverse=True)
+        else:
+            _rows.reverse()  # load() 是按写入顺序，倒过来即最新在前
+
+        st.markdown(
+            '<div class="src">展示 <b>%d</b> 件作品　｜　'
+            '全班互评共 <b>%d</b> 条%s</div>'
+            % (len(_rows), _pr_all.get("total", 0),
+               ("　｜　你已评 <b>%d</b> 件" % len(_my_reviewed))
+               if _reviewer else "　｜　（填学号后可记录你的互评）"),
+            unsafe_allow_html=True)
+        st.write("")
+
+        # ---- 网格：每行 3 件 ----
+        _COLS = 3
+        for _i in range(0, len(_rows), _COLS):
+            _batch = _rows[_i:_i + _COLS]
+            _cols = st.columns(_COLS, gap="medium")
+            for _col, _w in zip(_cols, _batch):
+                with _col:
+                    _wid = _w.get("work_id") or ""
+                    _p0 = [p for p in (_w.get("output_path") or "").split(",")
+                           if p and os.path.exists(p)]
+                    st.markdown(
+                        '<div class="gal"><img src="data:image/jpeg;'
+                        'base64,%s" /></div>' % _b64_thumb(_p0[0], box=640),
+                        unsafe_allow_html=True)
+                    st.markdown(
+                        '<div class="motif-title">%s</div>'
+                        '<div class="motif-meta">%s　·　%s</div>'
+                        % (_esc(_wid),
+                           _esc(str(_w.get("student_id") or "未署名")),
+                           "单图重组" if _w.get("mode") == "img2img"
+                           else "多纹样组合"),
+                        unsafe_allow_html=True)
+
+                    _dn = (_w.get("design_note") or "").strip()
+                    st.markdown(
+                        '<div class="gal-note">%s</div>'
+                        % (_esc("设计说明：" + _dn) if _dn
+                           else "作者还没写设计说明"),
+                        unsafe_allow_html=True)
+
+                    _n = _by_work.get(_wid, 0)
+                    st.markdown(
+                        '<div class="gal-meta">互评 %d 条%s</div>'
+                        % (_n, "　· 你已评" if _wid in _my_reviewed else ""),
+                        unsafe_allow_html=True)
+
+                    with st.expander("看详情 / 写互评"):
+                        st.markdown(
+                            "模式：%s ｜ 强度：%s ｜ 种子：%s"
+                            % (_w.get("mode"), _w.get("denoise"),
+                               _w.get("seed")))
+                        st.markdown("提示词：%s" % (_w.get("prompt") or "—"))
+                        if _dn:
+                            st.markdown("**设计说明**：%s" % _dn)
+                        st.divider()
+
+                        # 已有的互评
+                        _prs = archive.load_peer_reviews(_wid)
+                        if _prs:
+                            st.markdown("**已有互评（%d 条）**" % len(_prs))
+                            for _p in _prs:
+                                st.markdown(
+                                    "· %s：优点「%s」　建议「%s」"
+                                    % (_p.get("reviewer_name")
+                                       or _p.get("reviewer_id") or "匿名",
+                                       _p.get("merit") or "—",
+                                       _p.get("suggestion") or "—"))
+                            st.divider()
+
+                        # 写互评
+                        if not _reviewer:
+                            st.markdown(
+                                '<div class="caution">请先到 <b>⓪ 课程导航</b> '
+                                '填上学号，才能记录你的互评。</div>',
+                                unsafe_allow_html=True)
+                        elif _wid in _my_reviewed:
+                            st.markdown(
+                                '<div class="done">你已评过这件作品。'
+                                '重新提交会覆盖原评价。</div>',
+                                unsafe_allow_html=True)
+
+                        _mv = st.text_area(
+                            "优点：你看到哪里做得好？",
+                            height=70, key="pm_%s" % _wid,
+                            placeholder="例如：靛蓝底和桃红花枝的对比很克制，"
+                                        "没有堆太多颜色。")
+                        _sg = st.text_area(
+                            "建议：给一条具体、可操作的建议",
+                            height=70, key="ps_%s" % _wid,
+                            placeholder="例如：花心可以再收一点，"
+                                        "现在和外圈花瓣一样重，注意力散了。")
+                        # 自己不能评自己 —— 否则互评环节失去意义
+                        if _w.get("student_id") == _reviewer:
+                            st.caption("这是你自己的作品，跳过互评。")
+                        elif st.button("提交互评", key="pbtn_%s" % _wid):
+                            if not _mv.strip() or not _sg.strip():
+                                st.warning("优点和建议都要写。"
+                                           "只说「挺好的」不算互评。")
+                            else:
+                                archive.add_peer_review(
+                                    _wid, reviewer_id=_reviewer,
+                                    reviewer_name=st.session_state.get(
+                                        "student_name", "") or _reviewer,
+                                    merit=_mv.strip(), suggestion=_sg.strip())
+                                st.success("已提交")
+                                st.rerun()
+
 
 # ------------------------------------------------------------------
 # ④ 提取纹样
@@ -1202,11 +1623,6 @@ with tab_extract:
 # ⑤ 标注
 # ------------------------------------------------------------------
 with tab_annotate:
-    from annotation_store import (
-        AnnotationStore, ANNOTATION_FIELDS, REQUIRED_FIELDS,
-        VALUE_OPTIONS, FIELD_HINTS,
-    )
-    from html import escape as _esc
 
     st.markdown(
         '<div class="note">为纹样补充「地域、技法、主色调」等属性。'
@@ -1216,7 +1632,9 @@ with tab_annotate:
     )
     st.write("")
 
-    ann_store = AnnotationStore()
+    # 注意：ann_store 现在提到模块级共享区创建（见 archive 那一段）。
+    # 原因是 ⓪ 课程导航页也要读标注进度，而标签页代码是按顺序执行的，
+    # 在这里才创建的话 ⓪ 页拿不到。
 
     # ---- 拿到「每组一张代表图」的清单 ----
     if DB_OK:

@@ -24,9 +24,11 @@ OUT_DIR = os.path.join(APP_DIR, "data", "ui_shots")
 
 # 标签页名称（与 streamlit_app.py 里 st.tabs 的定义一致）
 TAB_NAMES = [
+    "⓪ 课程导航",
     "① 检索纹样",
     "② AI 重组创作",
     "③ 我的作品",
+    "⑦ 作品展示墙",
     "④ 提取纹样",
     "⑤ 标注纹样",
     "⑥ 知识图谱",

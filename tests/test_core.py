@@ -1428,6 +1428,190 @@ if _cg is not None:
 
 
 # ===========================================================================
+# 课程结构（app/course.py）
+# ===========================================================================
+section("课程结构：单元、课时、分层与进度")
+
+import course
+
+# --- 结构完整性 ---
+check("课程含 4 个教学单元", len(course.UNITS) == 4,
+      "实际 %d" % len(course.UNITS))
+
+# 方案 §6：16 学时理论 + 16 学时实验 = 32 课时
+check("总课时为 32", course.TOTAL_HOURS == 32,
+      "实际 %d" % course.TOTAL_HOURS)
+check("理论 16 课时", course.THEORY_HOURS == 16,
+      "实际 %d" % course.THEORY_HOURS)
+check("实践 16 课时", course.PRACTICE_HOURS == 16,
+      "实际 %d" % course.PRACTICE_HOURS)
+
+# 每个单元都要有课时、标签页、产出、步骤、实验指导书
+for _u in course.UNITS:
+    _p = "第%d单元" % _u["no"]
+    check("%s 有课时" % _p, _u["hours"] > 0)
+    check("%s 理论+实践=总课时" % _p,
+          _u["theory"] + _u["practice"] == _u["hours"])
+    check("%s 指向至少一个标签页" % _p, len(_u["tabs"]) > 0)
+    check("%s 有产出物" % _p, len(_u["outputs"]) > 0)
+    check("%s 有操作步骤" % _p, len(_u["steps"]) > 0)
+    check("%s 有拓展层任务" % _p, len(_u["advanced"]) > 0)
+    check("%s 有实验指导书" % _p, bool(_u["exp_file"]))
+
+# 单元序号必须连续 1..4
+check("单元序号连续",
+      [u["no"] for u in course.UNITS] == [1, 2, 3, 4])
+
+# --- 标签页反查 ---
+check("⑥ 知识图谱 归到第二单元",
+      course.unit_for_tab("⑥ 知识图谱")["no"] == 2)
+check("② AI 重组创作 归到第三单元",
+      course.unit_for_tab("② AI 重组创作")["no"] == 3)
+check("④ 提取纹样 归到第一单元",
+      course.unit_for_tab("④ 提取纹样")["no"] == 1)
+check("未知标签页返回 None",
+      course.unit_for_tab("__不存在__") is None)
+
+# 界面里实际存在的标签页都应能被某单元认领（不能有孤儿页）
+for _t in ["① 检索纹样", "② AI 重组创作", "③ 我的作品",
+           "④ 提取纹样", "⑤ 标注纹样", "⑥ 知识图谱"]:
+    check("标签页 %s 能挂到某单元" % _t,
+          course.unit_for_tab(_t) is not None)
+
+# --- 分层 ---
+check("有两个学习层次", len(course.TRACKS) == 2)
+check("层次含基础层", course.TRACK_BASIC in course.TRACKS)
+check("层次含拓展层", course.TRACK_ADVANCED in course.TRACKS)
+
+# --- 进度计算：空状态 ---
+_ctx0 = {"annotated_groups": 0, "total_groups": 245, "extracted_count": 0,
+         "works": [], "peer_reviews_given": 0, "student_id": "S1"}
+_p0 = course.overall_progress(_ctx0)
+check("空状态下没有单元完成", _p0["units_done"] == 0)
+check("空状态进度为 0", _p0["ratio"] == 0.0)
+for _r in _p0["rows"]:
+    check("空状态每个单元都有说明文字", bool(_r["label"]))
+
+# --- 进度计算：全部完成 ---
+_ctx1 = {"annotated_groups": 5, "total_groups": 245, "extracted_count": 3,
+         "works": [{"student_id": "S1", "design_note": "改了配色"}],
+         "peer_reviews_given": 3, "student_id": "S1"}
+_p1 = course.overall_progress(_ctx1)
+check("数据齐全时 4 个单元全完成", _p1["units_done"] == 4,
+      "实际 %d" % _p1["units_done"])
+check("全完成时进度为 1", abs(_p1["ratio"] - 1.0) < 1e-9)
+
+# --- 单元 2 门槛：标注不足 3 组不算完成 ---
+_ctx2 = dict(_ctx1)
+_ctx2["annotated_groups"] = 2
+_r2 = course.unit_progress(course.UNITS[1], _ctx2)
+check("标注 2 组未达门槛，单元2 未完成", not _r2["done"])
+_ctx2["annotated_groups"] = 3
+_r2b = course.unit_progress(course.UNITS[1], _ctx2)
+check("标注满 3 组，单元2 完成", _r2b["done"])
+
+# --- 单元 3：有作品但没写设计说明，只算半完成 ---
+_ctx3 = {"annotated_groups": 0, "total_groups": 245, "extracted_count": 0,
+         "works": [{"student_id": "S1", "design_note": ""}],
+         "peer_reviews_given": 0, "student_id": "S1"}
+_r3 = course.unit_progress(course.UNITS[2], _ctx3)
+check("有作品但无设计说明 -> 未完成", not _r3["done"])
+check("有作品但无设计说明 -> 进度 0.5", abs(_r3["ratio"] - 0.5) < 1e-9)
+check("提示里点出缺设计说明", "设计说明" in _r3["label"])
+
+# --- 只统计本人作品 ---
+_ctx4 = {"annotated_groups": 0, "total_groups": 245, "extracted_count": 0,
+         "works": [{"student_id": "S1", "design_note": "a"},
+                   {"student_id": "S2", "design_note": ""}],
+         "peer_reviews_given": 0, "student_id": "S1"}
+_r4 = course.unit_progress(course.UNITS[2], _ctx4)
+check("只算本人作品时，别人的空说明不影响", _r4["done"])
+
+
+# ===========================================================================
+# 作品归档扩展：设计说明 + 学生互评
+# ===========================================================================
+section("作品归档：设计说明与学生互评")
+
+import tempfile as _tf
+from archive import WorkArchive, WORK_FIELDS, PEER_FIELDS
+
+_tmp2 = _tf.mkdtemp()
+_ar2 = WorkArchive(os.path.join(_tmp2, "works.csv"),
+                   os.path.join(_tmp2, "generated"))
+
+check("WORK_FIELDS 含 design_note", "design_note" in WORK_FIELDS)
+check("PEER_FIELDS 定义完整",
+      set(["work_id", "reviewer_id", "reviewer_name",
+           "merit", "suggestion", "created_at"]) <= set(PEER_FIELDS))
+
+_w1 = _ar2.record(student_id="S1", student_name="张三",
+                  source_images=["basic_0"], mode="img2img",
+                  prompt="miao", output_path="/tmp/a.png")
+check("新记录默认 design_note 为空", _ar2.load()[0]["design_note"] == "")
+
+# 写设计说明
+_ok = _ar2.update_design_note(_w1, "把底布换成深靛蓝，保留花枝走向")
+check("设计说明写入成功", _ok)
+check("设计说明读回正确",
+      _ar2.load()[0]["design_note"] == "把底布换成深靛蓝，保留花枝走向")
+check("写设计说明不影响审核状态",
+      _ar2.load()[0]["review_status"] == "待审核")
+
+# 写不存在的作品应返回 False，而不是崩
+check("改不存在的作品返回 False",
+      _ar2.update_design_note("__nope__", "x") is False)
+
+# --- 互评 ---
+_ar2.add_peer_review(_w1, reviewer_id="S2", reviewer_name="李四",
+                     merit="配色克制", suggestion="花心可以再收一点")
+check("互评写入成功", len(_ar2.load_peer_reviews(_w1)) == 1)
+
+# 同一人重复提交应覆盖而非追加
+_ar2.add_peer_review(_w1, reviewer_id="S2", reviewer_name="李四",
+                     merit="改后的优点", suggestion="改后的建议")
+_pr = _ar2.load_peer_reviews(_w1)
+check("同一人重复互评去重为 1 条", len(_pr) == 1)
+check("重复互评保留最新内容", _pr[0]["merit"] == "改后的优点")
+
+# 第二个人评同一件
+_ar2.add_peer_review(_w1, reviewer_id="S3", reviewer_name="王五",
+                     merit="结构好", suggestion="纹理可保留更多")
+check("不同人可各评一条", len(_ar2.load_peer_reviews(_w1)) == 2)
+
+# 统计
+_w2 = _ar2.record(student_id="S2", student_name="李四", output_path="/tmp/b.png")
+check("按学号统计已评数（S2 评了 1 件）",
+      _ar2.peer_review_stats("S2")["given"] == 1)
+check("统计全表互评条数", _ar2.peer_review_stats()["total"] == 2)
+check("统计每件作品收到几条",
+      _ar2.peer_review_stats()["by_work"].get(_w1) == 2)
+
+# 按作品筛选互评
+check("按 work_id 筛互评", len(_ar2.load_peer_reviews(_w2)) == 0)
+
+# --- 旧表兼容：没有 design_note 列的历史文件也要能读 ---
+_legacy = os.path.join(_tmp2, "legacy.csv")
+_old_cols = [c for c in WORK_FIELDS if c != "design_note"]
+import csv as _csv
+with open(_legacy, "w", newline="", encoding="utf-8-sig") as _f:
+    _wtr = _csv.DictWriter(_f, fieldnames=_old_cols)
+    _wtr.writeheader()
+    _wtr.writerow({c: ("W1" if c == "work_id" else "") for c in _old_cols})
+_ar3 = WorkArchive(_legacy, os.path.join(_tmp2, "g2"))
+_leg = _ar3.load()
+check("旧表读取不报错", len(_leg) == 1)
+check("旧表补齐 design_note 键", "design_note" in _leg[0])
+check("旧表 design_note 值为空串", _leg[0]["design_note"] == "")
+# 在旧表上写新字段，重写后不能丢列
+check("旧表可写设计说明", _ar3.update_design_note("W1", "补的新说明"))
+check("旧表写后仍是完整列数",
+      len(_ar3.load()[0]) == len(WORK_FIELDS),
+      "实际 %d / 期望 %d" % (len(_ar3.load()[0]), len(WORK_FIELDS)))
+check("旧表写后能读回", _ar3.load()[0]["design_note"] == "补的新说明")
+
+
+# ===========================================================================
 # 汇总
 # ===========================================================================
 print()

@@ -34,17 +34,39 @@ WORK_FIELDS = [
     "denoise", "blend", "seed",
     "model_or_workflow", "workflow_file",
     "created_at", "output_path",
+    "design_note",          # 设计说明：学生自己写「改了什么、为什么这么改」
     "review_status",        # 待审核 / 通过 / 需修改
     "review_note", "permission_note",
+]
+
+
+#: 互评表的字段。
+#:
+#: 为什么单独一张表、而不是塞进 works.csv：
+#:   一件作品会被**多人**评价，是「多对一」关系。塞进作品行里
+#:   只能存最后一条，前面写的就被覆盖了。而且同学之间评价是
+#:   课程第四单元的核心产出，不能丢。
+PEER_FIELDS = [
+    "work_id",        # 被评的作品
+    "reviewer_id",    # 评价人学号
+    "reviewer_name",  # 评价人姓名
+    "merit",          # 先说优点（方案要求：先肯定，再建议）
+    "suggestion",     # 再给一条具体建议
+    "created_at",
 ]
 
 
 class WorkArchive:
     """作品归档：写 CSV 记录 + 保存图片文件。"""
 
-    def __init__(self, csv_path, output_dir):
+    def __init__(self, csv_path, output_dir, peer_path=None):
         self.csv_path = csv_path
         self.output_dir = output_dir
+        # 互评表默认跟作品表放同一目录，叫 works_peer_review.csv
+        if peer_path is None:
+            peer_path = os.path.join(os.path.dirname(os.path.abspath(csv_path)),
+                                     "works_peer_review.csv")
+        self.peer_path = peer_path
         os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
         os.makedirs(output_dir, exist_ok=True)
 
@@ -67,9 +89,15 @@ class WorkArchive:
                seed=None, denoise=None, blend=None,
                model_or_workflow="", workflow_file="",
                output_path="", student_name="", task_id="",
+               design_note="",
                review_status="待审核", review_note="",
                permission_note=""):
-        """写入一条作品记录，返回 work_id。"""
+        """写入一条作品记录，返回 work_id。
+
+        design_note 是**学生自己写**的设计说明。生成时留空，
+        由学生在 ③ 我的作品 页补填 —— 方案第四单元要求
+        「提交作品、设计说明和过程记录」，说明不能由程序代写。
+        """
         self._ensure_header()
         wid = self.new_work_id(student_id)
         row = {
@@ -89,6 +117,7 @@ class WorkArchive:
             "workflow_file": workflow_file,
             "created_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "output_path": output_path,
+            "design_note": design_note,
             "review_status": review_status,
             "review_note": review_note,
             "permission_note": permission_note,
@@ -96,6 +125,101 @@ class WorkArchive:
         with open(self.csv_path, "a", newline="", encoding="utf-8-sig") as f:
             csv.DictWriter(f, fieldnames=WORK_FIELDS).writerow(row)
         return wid
+
+    # ------------------------------------------------------------------
+    def update_design_note(self, work_id, note):
+        """学生补填 / 修改设计说明。"""
+        return self._update_field(work_id, "design_note", note)
+
+    def _update_field(self, work_id, field, value):
+        """改某个作品的一个字段。CSV 模式需重写整个文件。
+
+        抽出来是因为「改设计说明」和「教师审核」要做同一件事，
+        区别只在改哪个字段 —— 复制两份容易改漏一处。
+        """
+        if not os.path.exists(self.csv_path) or field not in WORK_FIELDS:
+            return False
+        rows, found = [], False
+        with open(self.csv_path, encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                if r.get("work_id") == work_id:
+                    r[field] = value
+                    found = True
+                # 补齐旧表缺的列：否则重写时这些新列会整体丢失
+                for k in WORK_FIELDS:
+                    r.setdefault(k, "")
+                rows.append(r)
+        if found:
+            with open(self.csv_path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=WORK_FIELDS, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(rows)
+        return found
+
+    # ------------------------------------------------------------------
+    # 学生互评（课程第四单元）
+    # ------------------------------------------------------------------
+    def _ensure_peer_header(self):
+        if not os.path.exists(self.peer_path):
+            os.makedirs(os.path.dirname(os.path.abspath(self.peer_path)),
+                        exist_ok=True)
+            with open(self.peer_path, "w", newline="", encoding="utf-8-sig") as f:
+                csv.DictWriter(f, fieldnames=PEER_FIELDS).writeheader()
+
+    def add_peer_review(self, work_id, reviewer_id="", reviewer_name="",
+                        merit="", suggestion=""):
+        """写一条互评。
+
+        同一个人对同一件作品只保留最新一条 —— 学生改主意时
+        不该在列表里留下两条自相矛盾的评价。
+        """
+        self._ensure_peer_header()
+        rows = self.load_peer_reviews()
+        rows = [r for r in rows
+                if not (r.get("work_id") == work_id
+                        and r.get("reviewer_id") == reviewer_id)]
+        rows.append({
+            "work_id": work_id,
+            "reviewer_id": reviewer_id,
+            "reviewer_name": reviewer_name,
+            "merit": merit,
+            "suggestion": suggestion,
+            "created_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        with open(self.peer_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.DictWriter(f, fieldnames=PEER_FIELDS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+        return True
+
+    def load_peer_reviews(self, work_id=None):
+        """读互评。给定 work_id 就只返回那件作品的。"""
+        if not os.path.exists(self.peer_path):
+            return []
+        with open(self.peer_path, encoding="utf-8-sig", newline="") as f:
+            rows = [dict(r) for r in csv.DictReader(f)]
+        if work_id is not None:
+            rows = [r for r in rows if r.get("work_id") == work_id]
+        return rows
+
+    def peer_review_stats(self, reviewer_id=""):
+        """算互评统计，供课程进度用。
+
+        返回 {'given': 我评过几件, 'received': 我的作品被评了几件,
+              'by_work': {work_id: 条数}}
+        """
+        rows = self.load_peer_reviews()
+        works = self.load()
+        mine = {w["work_id"] for w in works
+                if reviewer_id and reviewer_id in str(w.get("student_id") or "")}
+        by_work = {}
+        for r in rows:
+            by_work[r["work_id"]] = by_work.get(r["work_id"], 0) + 1
+        given = len({r["work_id"] for r in rows
+                     if r.get("reviewer_id") == reviewer_id}) if reviewer_id else 0
+        received = sum(by_work.get(w, 0) for w in mine)
+        return {"given": given, "received": received,
+                "total": len(rows), "by_work": by_work}
 
     # ------------------------------------------------------------------
     def save_output(self, work_id, images, dest_dir=None):
@@ -134,6 +258,9 @@ class WorkArchive:
                     r["review_status"] = status
                     r["review_note"] = note
                     found = True
+                # 补齐旧表缺的列（同 _update_field 的理由）
+                for k in WORK_FIELDS:
+                    r.setdefault(k, "")
                 rows.append(r)
         if found:
             with open(self.csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -143,10 +270,20 @@ class WorkArchive:
         return found
 
     def load(self):
+        """读全部作品记录。
+
+        兼容旧表：老版本的 works.csv 没有 design_note 列。
+        这里按当前 WORK_FIELDS 补齐缺失的键（值为空串），
+        这样调用方可以无条件访问 w["design_note"]，不用到处写 .get()。
+        """
         if not os.path.exists(self.csv_path):
             return []
         with open(self.csv_path, encoding="utf-8-sig", newline="") as f:
-            return [dict(r) for r in csv.DictReader(f)]
+            rows = [dict(r) for r in csv.DictReader(f)]
+        for r in rows:
+            for k in WORK_FIELDS:
+                r.setdefault(k, "")
+        return rows
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +385,16 @@ if __name__ == "__main__":
     ok = ar.update_review(wid, "通过", "构图完整，色彩符合苗绣特征")
     print("  审核更新：", "成功" if ok else "失败")
     print("  审核后状态：", ar.load()[0]["review_status"])
+
+    # 设计说明 + 互评自检
+    ar.update_design_note(wid, "把底布换成深靛蓝，保留花枝走向")
+    print("  设计说明：", ar.load()[0]["design_note"])
+    ar.add_peer_review(wid, "S002", "李四",
+                       merit="配色克制，符合苗绣的靛蓝基调",
+                       suggestion="花枝可以再疏一点，现在有点满")
+    ar.add_peer_review(wid, "S002", "李四",
+                       merit="改后的描述", suggestion="改后的建议")
+    pr = ar.load_peer_reviews(wid)
+    print("  互评条数（同一人重复提交应去重为 1）：", len(pr))
+    st = ar.peer_review_stats("S002")
+    print("  互评统计：已评 %d 件 / 全表 %d 条" % (st["given"], st["total"]))

@@ -89,6 +89,36 @@ def global_css() -> str:
                    width: auto; height: auto; display: block; }
       .thumb-miss { color: %(ink_mute)s; font-size: .84rem; }
 
+      /* ---- 展示墙缩略图：与 .thumb 相反，这个**要填满** ----
+         这里展示的是**生成作品**，不是待取材的纹样库。两者要求不同：
+           .thumb    纹样库 —— 必须完整显示，裁一点就丢信息
+           .gal      展示墙 —— 画面饱满优先，有一点裁切可接受
+         用 contain 会让宽幅生成图两侧空出大片灰带，三列并排时
+         整行看起来像没加载出来。所以这里用 cover + 4:3 定高。
+         注意别把这条用在检索页：那里裁掉的正是花心。 */
+      .gal {
+        height: 200px; overflow: hidden; border-radius: 3px;
+        border: 1px solid %(silver)s; background: %(indigo_soft)s;
+      }
+      .gal img { width: 100%%; height: 100%%; object-fit: cover;
+                 display: block; }
+
+      /* 展示墙卡片里的设计说明：固定两行高。
+         三列并排时，摘要行数不一致会把下面的按钮推得一条高一条低，
+         整行看起来像没对齐的表。截两行 + 省略号，高度就一致了。 */
+      .gal-note {
+        font-size: .78rem; color: %(ink_soft)s; line-height: 1.5;
+        height: 2.6rem; overflow: hidden;
+        display: -webkit-box; -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical; margin: .2rem 0 .35rem 0;
+      }
+      /* 互评条数那一行也固定高度：它有时带「· 你已评」有时不带，
+         两种长度导致换行与否不同，同样会把下方按钮推歪。 */
+      .gal-meta {
+        font-size: .74rem; color: %(ink_mute)s; line-height: 1.6;
+        height: 1.2rem; overflow: hidden; margin-bottom: .35rem;
+      }
+
       /* ---- 按钮 ----
          主按钮用深靛蓝而非朱砂：朱砂留给「警示」和「强调标记」，
          到处用红会迅速贬值，也会让整页显得焦躁。
