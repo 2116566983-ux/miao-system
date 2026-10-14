@@ -1,0 +1,42 @@
+@echo off
+REM ==========================================================================
+REM 本地私有配置 · 示例文件
+REM ==========================================================================
+REM 用法：
+REM   把本文件复制一份、改名为  start.local.bat  （不要带 .example）
+REM   然后填入自己的凭据。start.bat 与 tools\start_neo4j.bat 会自动读取。
+REM
+REM 为什么不直接写在 start.bat 里：
+REM   本文件（.example）会进版本库，start.local.bat 不会（见 .gitignore）。
+REM   仓库是公开的，密码和密钥不能进版本库，否则会被爬虫扫到。
+REM
+REM 留空或整个文件不存在都没关系 —— 系统会自动降级为 CSV 模式，
+REM 检索、提取、标注、知识图谱教学页全部照常可用。
+REM ==========================================================================
+
+REM ---- 本地 Neo4j（可选）----
+set NEO4J_URI=bolt://localhost:7687
+set NEO4J_USER=neo4j
+set NEO4J_PASSWORD=在这里填你的密码
+
+REM Neo4j 解压目录（含 lib\ 与 conf\ 的那一层）
+set NEO4J_HOME=C:\neo4j\neo4j-community-5.26.0
+
+REM ---- 免费云端生图 API（可选）----
+REM 申请：https://modelscope.cn （需阿里云实名认证）
+REM 详见 docs/free-api-guide.md
+set IMAGE_API_KEY=
+set IMAGE_API_MODEL=Qwen/Qwen-Image-Edit
+
+REM ---- 本地 ComfyUI（可选）----
+set COMFYUI_URL=http://127.0.0.1:8188
+
+REM ---- 远端 ComfyUI（可选）：设了 HOST 就自动建 SSH 隧道 ----
+REM 详见 docs/remote-comfyui.md
+set COMFYUI_SSH_HOST=
+set COMFYUI_SSH_PORT=22
+set COMFYUI_SSH_USER=
+set COMFYUI_SSH_KEY=
+
+REM ---- 图片目录（可选，覆盖元数据里的路径）----
+REM set MIAO_IMAGE_ROOT=C:\path\to\images

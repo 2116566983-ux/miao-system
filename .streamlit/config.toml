@@ -1,0 +1,51 @@
+# ============================================================================
+# Streamlit 原生主题
+# ============================================================================
+# 为什么需要这个文件：
+#   仅靠注入 <style> 无法改变 Streamlit 的**内置组件配色**——
+#   滑块、多选框、focus 边框、tab 高亮、链接色都取自这里的
+#   primaryColor。不设的话会保留 Streamlit 默认红（#FF4B4B），
+#   和苗绣的朱砂色撞车，整页看起来就是"没调过的模板"。
+#
+# 配色与 app/theme.py 保持一致：
+#   靛蓝土布 #243b53 ／ 朱砂绣线 #a8352a ／ 素纸底 #f8f7f4
+# ============================================================================
+
+[theme]
+base = "light"
+
+# 主强调色 = 靛蓝土布
+# 这是 Streamlit 内置控件的配色来源：滑块、focus 边框、多选框、
+# 链接色等都由它决定。
+#
+# 为什么不用朱砂红：朱砂留给「警示」和「强调标记」（见 theme.py 的
+# .caution / h2 左边线）。如果把它设为主色，页面上会到处是红，
+# 红色迅速贬值，整页也显得焦躁。靛蓝是这套数据的底色，更稳。
+primaryColor = "#243b53"
+
+# 页面底色 = 素纸（不用纯白，接近布面）
+backgroundColor = "#f8f7f4"
+
+# 侧边栏 / 次级面板 = 极淡靛蓝
+secondaryBackgroundColor = "#eaeff4"
+
+# 正文 = 墨色（不用纯黑，长时间阅读更柔和）
+textColor = "#2b2b2b"
+
+# 字体：sans-serif 是 Streamlit 的合法枚举值。
+# 中文字形的具体字体族在 app/theme.py 的 CSS 里指定
+# （Noto Sans SC / 思源黑体 / 苹方 逐级回退）。
+font = "sans-serif"
+
+[browser]
+# 教学场景：关闭使用统计上报，避免课堂网络环境下卡顿。
+# 注意：这一项**只能**放在 [browser] 下。Streamlit 1.65 里
+# [server] 段没有 gatherUsageStats 这个键，写在那里会在每次
+# 启动时打一条 "not a valid config option" 警告（不致命，
+# 但会让学生以为程序有问题）。
+gatherUsageStats = false
+
+[client]
+# 表格默认显示全部列，避免学生以为"数据丢了"
+showErrorDetails = true
+toolbarMode = "minimal"

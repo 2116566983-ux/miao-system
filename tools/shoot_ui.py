@@ -1,0 +1,105 @@
+# -*- coding: utf-8 -*-
+"""
+界面截图工具（开发用）
+
+用途：把 Streamlit 页面按标签页逐个截图，用于**视觉走查**——
+判断配色、间距、层级是否达到设计预期。纯看代码看不出"AI 味"，
+必须真的看一眼渲染结果。
+
+用法：
+    python tools/shoot_ui.py                 # 截全部标签页
+    python tools/shoot_ui.py --only 0        # 只截第 1 个标签页
+    python tools/shoot_ui.py --port 8501
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import time
+
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_DIR = os.path.join(APP_DIR, "data", "ui_shots")
+
+# 标签页名称（与 streamlit_app.py 里 st.tabs 的定义一致）
+TAB_NAMES = [
+    "① 检索纹样",
+    "② AI 重组创作",
+    "③ 我的作品",
+    "④ 提取纹样",
+    "⑤ 标注纹样",
+    "⑥ 知识图谱",
+]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8501)
+    ap.add_argument("--url", default=None)
+    ap.add_argument("--only", type=int, default=None,
+                    help="只截某个标签页（从 0 开始）")
+    ap.add_argument("--width", type=int, default=1500)
+    ap.add_argument("--height", type=int, default=1000)
+    ap.add_argument("--full", action="store_true",
+                    help="整页截图（默认只截视口）")
+    args = ap.parse_args()
+
+    url = args.url or "http://localhost:%d" % args.port
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("需要 playwright：pip install playwright && playwright install chromium")
+        return 2
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    targets = ([args.only] if args.only is not None
+               else list(range(len(TAB_NAMES))))
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": args.width,
+                                          "height": args.height},
+                                device_scale_factor=1)
+        page.goto(url, wait_until="networkidle", timeout=60000)
+
+        # Streamlit 首屏渲染较慢，等它把标题画出来
+        try:
+            page.wait_for_selector("h1", timeout=30000)
+        except Exception:
+            print("警告：没等到 h1，可能还在加载")
+        time.sleep(3)
+
+        for idx in targets:
+            name = TAB_NAMES[idx]
+            print("截图 %d/%d：%s" % (idx + 1, len(TAB_NAMES), name))
+            try:
+                # 点击对应标签
+                tab = page.get_by_role("tab", name=name)
+                if tab.count() == 0:
+                    # 退化：按文本找
+                    tab = page.locator("button[role=tab]", has_text=name)
+                tab.first.click()
+                time.sleep(2.5)
+            except Exception as e:
+                print("  跳过（找不到标签）：%s" % str(e)[:80])
+                continue
+
+            safe = name.replace(" ", "_").replace("①", "1") \
+                       .replace("②", "2").replace("③", "3") \
+                       .replace("④", "4").replace("⑤", "5") \
+                       .replace("⑥", "6")
+            fp = os.path.join(OUT_DIR, "%02d_%s.png" % (idx + 1, safe))
+            page.screenshot(path=fp, full_page=args.full)
+            print("  -> %s" % os.path.relpath(fp, APP_DIR))
+
+        browser.close()
+
+    print("\n完成。输出目录：%s" % os.path.relpath(OUT_DIR, APP_DIR))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,61 @@
+# ============================================================================
+# .gitignore — 公开仓库，以下内容一律不进版本库
+# ============================================================================
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 凭据与本地私有配置（最重要：绝不提交）----
+# 本机 Neo4j 密码、云端 API 密钥都放在 start.local.bat 里，
+# 仓库里只有 start.local.bat.example（不含真实值）。
+# 仓库是公开的，一旦提交真实凭据就会被爬虫扫到，且 git 历史里删不干净。
+start.local.bat
+.env
+*.key
+credentials.toml
+.secrets/
+.streamlit/secrets.toml
+
+# ---- 运行产物 ----
+data/generated/
+data/uploads/
+data/verify/
+data/ui_shots/
+*.log
+nohup.out
+
+# ---- 作品与标注的运行时数据 ----
+metadata/works.csv
+metadata/works_review.csv
+
+# ---- 需要凭据的探测脚本（依赖本机/服务器环境，不进公开仓库）----
+tools/probe_server.py
+tools/probe_comfy.py
+tools/probe_comfy_models.py
+tools/ssh_tunnel.py
+tools/verify_comfy.py
+tools/test_generate.py
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ============================================================================
+# 注意：.streamlit/ 不在忽略列表里，是**故意**的。
+# config.toml 里只有配色（靛蓝主色、素纸底），没有任何凭据，
+# 而它是「去 AI 味道」视觉成果的一部分 —— 不带上，别人跑起来
+# 看到的就是 Streamlit 默认红，视觉返工白做。
+# 如果将来要在里面放密钥，请改用 .streamlit/secrets.toml（上面已忽略）。
+# ============================================================================
+
+# ---- 提取过程的临时调试图（下划线开头，不进仓库）----
+# 保留 basic_*_motif.png 等真实产出，过滤开发期的一次性校验图
+data/motifs/_*.png
