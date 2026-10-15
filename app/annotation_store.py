@@ -28,6 +28,8 @@ import os
 from collections import OrderedDict
 from datetime import datetime
 
+import storage
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 标注字段定义（英文名 -> 中文标签）
@@ -159,44 +161,55 @@ class AnnotationStore:
         if not group_id:
             raise ValueError("group_id 不能为空")
 
-        data = self.load()
-        is_new = group_id not in data
-
         row = {k: "" for k in ANNOTATION_FIELDS}
         row.update({k: (values.get(k) or "").strip() for k in ANNOTATION_FIELDS})
         row["annotator"] = annotator.strip()
         row["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        data[group_id] = row
-        self._write(data)
-        self._data = data
+        # 整个「 load → 改 → _write 」必须包在一把锁里。
+        # 光给 _write 换成原子写是不够的：原子替换保证的是读者不会看到半张
+        # 表，但写者之间的互斥还得靠锁。不锁的话，两人各自 load 出旧表、
+        # 各自写回，先写那个就被后写的整表盖掉。
+        with storage.file_lock(self.path):
+            data = self.load()
+            is_new = group_id not in data
+            data[group_id] = row
+            self._write(data)
+            self._data = data
 
         filled = sum(1 for k in ANNOTATION_FIELDS if row.get(k))
         return is_new, filled
 
     def delete(self, group_id):
-        data = self.load()
-        if group_id in data:
+        with storage.file_lock(self.path):
+            data = self.load()
+            if group_id not in data:
+                return False
             del data[group_id]
             self._write(data)
             self._data = data
             return True
-        return False
 
     # ------------------------------------------------------------------
     def _write(self, data):
-        """整表重写。行数在千级以内，重写比增量更新更不容易出错。"""
+        """整表重写。行数在千级以内，重写比增量更新更不容易出错。
+
+        走 storage.atomic_write_csv（写临时文件 + os.replace），不再
+        `open(path, "w")` 直接截断：后者在写的过程中任何异常都会留下一张
+        残表，而半行 CSV 会让 DictReader 直接抛错，整张标注表读不出来。
+
+        调用方必须已经持有 self.path 的锁。
+        """
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
         fields = ["group_id"] + list(ANNOTATION_FIELDS) + EXTRA_FIELDS
 
-        with io.open(self.path, "w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields)
-            w.writeheader()
-            for gid in sorted(data):
-                row = {"group_id": gid}
-                row.update({k: data[gid].get(k, "") for k in ANNOTATION_FIELDS})
-                row.update({k: data[gid].get(k, "") for k in EXTRA_FIELDS})
-                w.writerow(row)
+        rows = []
+        for gid in sorted(data):
+            row = {"group_id": gid}
+            row.update({k: data[gid].get(k, "") for k in ANNOTATION_FIELDS})
+            row.update({k: data[gid].get(k, "") for k in EXTRA_FIELDS})
+            rows.append(row)
+        storage.atomic_write_csv(self.path, fields, rows)
 
     # ------------------------------------------------------------------
     def progress(self, total_groups):

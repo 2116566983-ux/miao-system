@@ -1733,6 +1733,129 @@ check("旧表写后能读回", _ar3.load()[0]["design_note"] == "补的新说明
 
 
 # ===========================================================================
+# 存储层：并发写的安全底座 app/storage.py
+# ===========================================================================
+# 这一组存在的理由：一个班几十个学生同时提交，原来的「读进来 → open('w')
+# 截断 → 写回」在 10 线程 × 20 条的实测里只剩 2~8 条（丢 ~97%）。丢的是
+# 学生填的设计说明，且全程无报错。必须钉住。
+section("存储层：文件锁与原子写 app/storage.py")
+
+import threading  # noqa: E402
+import time  # noqa: E402
+import inspect  # noqa: E402
+import storage  # noqa: E402
+
+_tmpS = tempfile.mkdtemp()
+_CSV_S = os.path.join(_tmpS, "safe.csv")
+_F = ["work_id", "note"]
+
+# --- 基本读写 ---
+check("读不存在的文件返回空列表", storage.read_csv_rows(_CSV_S) == [])
+storage.atomic_write_csv(_CSV_S, _F, [{"work_id": "W1", "note": "甲"}])
+_r = storage.read_csv_rows(_CSV_S, _F)
+check("原子写后可读回", len(_r) == 1 and _r[0]["work_id"] == "W1", str(_r))
+
+# --- 原子性：写坏了不能留残表和临时文件 ---
+storage.atomic_write_csv(_CSV_S, _F, [{"work_id": "W9", "note": "丙"}])
+_leftover = [n for n in os.listdir(_tmpS) if ".tmp_" in n]
+check("原子写不留临时文件", _leftover == [], str(_leftover))
+check("重写后是最新内容", storage.read_csv_rows(_CSV_S, _F)[0]["note"] == "丙")
+
+
+# 模拟写一半崩了：临时文件必须被收走，原表必须原样不动。
+# 不用 unittest.mock —— 这里只想造一个"写的过程中抛异常"，手工替换方法最直白。
+_orig_writer = storage.csv.DictWriter
+
+
+def _boom_writer(*a, **k):
+    raise RuntimeError("模拟写一半崩溃")
+
+
+storage.csv.DictWriter = _boom_writer
+try:
+    storage.atomic_write_csv(_CSV_S, _F, [{"work_id": "X", "note": "崩"}])
+    _crashed = False
+except RuntimeError:
+    _crashed = True
+finally:
+    storage.csv.DictWriter = _orig_writer
+
+check("写崩溃会抛出而非静默", _crashed)
+check("写崩溃后原表仍可读", storage.read_csv_rows(_CSV_S, _F)[0]["note"] == "丙")
+check("写崩溃后没有残留临时文件",
+      [n for n in os.listdir(_tmpS) if ".tmp_" in n] == [])
+
+# --- 多余列不会被写出去 ---
+storage.atomic_write_csv(_CSV_S, _F,
+                         [{"work_id": "W1", "note": "甲", "junk": "x"}])
+with open(_CSV_S, encoding="utf-8-sig", newline="") as f:
+    _hdr = next(csv.reader(f))
+check("多余列被丢弃而不报错", _hdr == _F, str(_hdr))
+
+# --- 并发：这是核心断言 ---
+storage.atomic_write_csv(_CSV_S, _F, [])
+_NT, _NE = 8, 15
+
+
+def _worker(tid):
+    for i in range(_NE):
+        with storage.file_lock(_CSV_S):
+            rows = storage.read_csv_rows(_CSV_S, _F)
+            rows.append({"work_id": "W%d_%d" % (tid, i), "note": str(tid)})
+            storage.atomic_write_csv(_CSV_S, _F, rows)
+
+
+_ts = [threading.Thread(target=_worker, args=(t,)) for t in range(_NT)]
+for t in _ts:
+    t.start()
+for t in _ts:
+    t.join()
+
+_rows = storage.read_csv_rows(_CSV_S, _F)
+check("并发 %d 线程各追加 %d 条不丢更新" % (_NT, _NE),
+      len(_rows) == _NT * _NE,
+      "实际 %d / 应为 %d" % (len(_rows), _NT * _NE))
+_ids = [r["work_id"] for r in _rows]
+check("并发写不产生重复行", len(set(_ids)) == len(_ids),
+      "重复 %d 条" % (len(_ids) - len(set(_ids))))
+check("并发写不产生残缺行", all(r["work_id"] for r in _rows))
+
+# --- 互斥本身：持锁期间别人抢不到 ---
+_lock_held = {"inner": False}
+
+
+def _holder():
+    with storage.file_lock(_CSV_S):
+        time.sleep(0.45)
+        _lock_held["inner"] = True
+
+
+_th = threading.Thread(target=_holder)
+_th.start()
+time.sleep(0.12)
+_t0 = time.time()
+with storage.file_lock(_CSV_S):
+    pass
+_waited = time.time() - _t0
+_th.join()
+check("锁忙时后来者会等待而非同时进入", _waited >= 0.15,
+      "等待 %.2fs" % _waited)
+check("持锁线程正常完成", _lock_held["inner"] is True)
+
+# --- 锁文件留在磁盘上（删掉会让互斥失效） ---
+check("锁文件保留而非删除", os.path.exists(_CSV_S + ".lock"))
+
+# --- Archive / AnnotationStore 走的是同一套底座 ---
+import archive as _arcmod  # noqa: E402
+import annotation_store as _asmod2  # noqa: E402
+
+check("archive 不再使用裸写（'w' 截断）",
+      'open(self.csv_path, "w"' not in inspect.getsource(_arcmod.WorkArchive))
+check("annotation_store 不再使用裸写",
+      'open(self.path, "w"' not in inspect.getsource(_asmod2.AnnotationStore))
+
+
+# ===========================================================================
 # 汇总
 # ===========================================================================
 print()

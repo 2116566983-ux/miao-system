@@ -324,7 +324,7 @@ miao-system/
 │   ├── free-api-guide.md    免费云端 API 接入
 │   └── comfyui-guide.md     ComfyUI 安装与工作流制作指南
 ├── tests/
-│   └── test_core.py         核心逻辑测试（402 项断言，离线可跑）
+│   └── test_core.py         核心逻辑测试（418 项断言，离线可跑）
 ├── tools/
 │   ├── build_thumbs.py      生成可随仓库发布的课堂缩略图集
 │   ├── check_ui.py          界面无头自测（AppTest，端到端）
@@ -877,7 +877,7 @@ python -m streamlit run app/streamlit_app.py
 python tests/test_core.py
 ```
 
-**402 项断言，当前全部通过。** 测试全程离线，不需要 Neo4j 或 ComfyUI。
+**418 项断言，当前全部通过。** 测试全程离线，不需要 Neo4j 或 ComfyUI。
 
 覆盖 16 个方面：
 
@@ -936,7 +936,7 @@ python tools/shoot_ui.py --only 5   # 只截第 6 个标签页（从 0 开始）
 
 **为什么需要这个**：无头自测能证明"控件都在"，但证明不了
 "看起来是不是对的"。实测有一处 Markdown 表格渲染成原始源码——
-402 项断言全过、无头检查也全过，只有截图看出来的。
+418 项断言全过、无头检查也全过，只有截图看出来的。
 所以视觉类改动做完必须**看一眼**，而且要**看两遍**：
 第一遍看整体风格，第二遍专找"这一类还有没有别的地方没改"。
 

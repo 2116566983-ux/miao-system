@@ -43,6 +43,12 @@ metadata/works_peer_review.csv
 #     python tools/build_thumbs.py --src <原图目录>
 data/images/*.tmp
 
+# ---- 并发写的锁文件与原子写的临时产物 ----
+# 学生提交/标注时目录里会冒出 *.csv.lock 和 *.tmp_xxxxxxxx，
+# 都是运行时副产物，不该出现在 git status 里。
+*.csv.lock
+*.tmp_*
+
 # ---- 需要凭据的探测脚本（依赖本机/服务器环境，不进公开仓库）----
 tools/probe_server.py
 tools/probe_comfy.py
