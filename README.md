@@ -564,7 +564,8 @@ Neo4j 5.x 需要 Java 17。推荐 [Eclipse Temurin](https://adoptium.net/)。
 **第 2 步：下载 Neo4j 社区版**
 
 从官网 https://neo4j.com/deployment-center/ 下载 Community Server 的 ZIP，
-解压到任意目录（本项目用的路径：`C:\Users\21165\miao-neo4j\neo4j-community-5.26.0`）。
+解压到任意目录（示例用`<你的解压目录>\neo4j-community-5.26.0`，
+    例如 `C:\Users\<你的用户名>\miao-neo4j\neo4j-community-5.26.0`）。
 
 > 若官网下载被拒（返回 `403 configured to block access from your country`），
 > 换国内镜像获取 ZIP 即可，包内容一致。
