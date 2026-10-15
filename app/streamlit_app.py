@@ -513,10 +513,10 @@ if not DEFAULT_IMAGE_ROOT:
 #   ⑦ 是**全班展示墙**（浏览同学作品、写互评）。
 #   合成一页会让「我的」和「大家的」混在一起，
 #   而第四单元的核心动作恰恰是「跳出自己的作品去看别人的」。
-tab_course, tab_search, tab_create, tab_works, tab_gallery, \
-    tab_extract, tab_annotate, tab_graph = st.tabs(
+tab_course, tab_search, tab_create, tab_works, \
+    tab_extract, tab_annotate, tab_graph, tab_gallery = st.tabs(
     ["⓪ 课程导航", "① 检索纹样", "② AI 重组创作", "③ 我的作品",
-     "⑦ 作品展示墙", "④ 提取纹样", "⑤ 标注纹样", "⑥ 知识图谱"])
+     "④ 提取纹样", "⑤ 标注纹样", "⑥ 知识图谱", "⑦ 作品展示墙"])
 
 
 # ------------------------------------------------------------------
@@ -1287,176 +1287,6 @@ with tab_works:
                     st.metric("图库中的作品", nw[0].get("n", 0))
 
 # ------------------------------------------------------------------
-# ⑦ 作品展示墙
-# ------------------------------------------------------------------
-# 与 ③ 我的作品 的区别：
-#   ③ 是个人视角（我的作品、我填说明、教师对我的审核）
-#   ⑦ 是班级视角（全班作品、我给别人写互评）
-# 方案第四单元要求「完成作品展示、互评和过程归档」，
-# 互评必须发生在**别人的**作品上，所以单独一页。
-with tab_gallery:
-    st.markdown(
-        '<div class="done">全班作品展示墙。</div>', unsafe_allow_html=True)
-    st.write("")
-
-    _all_works = archive.load()
-    _gallery = [w for w in _all_works if (w.get("output_path") or "").strip()]
-    # 只展示有图的（文件确实存在的），否则展示墙全是破图
-    _gallery = [w for w in _gallery
-                if any(os.path.exists(p)
-                       for p in (w.get("output_path") or "").split(",") if p)]
-
-    if not _gallery:
-        st.markdown(
-            '<div class="note">还没有作品。</div>',
-            unsafe_allow_html=True)
-    else:
-        _pr_all = archive.peer_review_stats()
-        _by_work = _pr_all.get("by_work", {})
-        _reviewer = st.session_state.get("student_id", "").strip()
-
-        # ---- 筛选 ----
-        _g1, _g2, _g3 = st.columns([2, 2, 3])
-        with _g1:
-            _g_mode = st.selectbox(
-                "创作模式",
-                ["全部", "单图重组", "多纹样组合"],
-                key="gal_mode")
-        with _g2:
-            _g_only_unreviewed = st.checkbox("只看我还没评的", value=False,
-                                             key="gal_unrev")
-        with _g3:
-            _g_sort = st.radio("排序", ["最新在前", "互评最多"],
-                               horizontal=True, key="gal_sort")
-
-        _rows = list(_gallery)
-        if _g_mode == "单图重组":
-            _rows = [w for w in _rows if (w.get("mode") or "") == "img2img"]
-        elif _g_mode == "多纹样组合":
-            _rows = [w for w in _rows if (w.get("mode") or "") == "multi_motif"]
-
-        _my_reviewed = set()
-        if _reviewer:
-            _my_reviewed = {r.get("work_id")
-                            for r in archive.load_peer_reviews()
-                            if r.get("reviewer_id") == _reviewer}
-        if _g_only_unreviewed and _reviewer:
-            _rows = [w for w in _rows if w.get("work_id") not in _my_reviewed]
-
-        if _g_sort == "互评最多":
-            _rows.sort(key=lambda w: _by_work.get(w.get("work_id"), 0),
-                       reverse=True)
-        else:
-            _rows.reverse()  # load() 是按写入顺序，倒过来即最新在前
-
-        st.markdown(
-            '<div class="src">展示 <b>%d</b> 件作品　｜　'
-            '全班互评共 <b>%d</b> 条%s</div>'
-            % (len(_rows), _pr_all.get("total", 0),
-               ("　｜　你已评 <b>%d</b> 件" % len(_my_reviewed))
-               if _reviewer else "　｜　（填学号后可记录你的互评）"),
-            unsafe_allow_html=True)
-        st.write("")
-
-        # ---- 网格：每行 3 件 ----
-        _COLS = 3
-        for _i in range(0, len(_rows), _COLS):
-            _batch = _rows[_i:_i + _COLS]
-            _cols = st.columns(_COLS, gap="medium")
-            for _col, _w in zip(_cols, _batch):
-                with _col:
-                    _wid = _w.get("work_id") or ""
-                    _p0 = [p for p in (_w.get("output_path") or "").split(",")
-                           if p and os.path.exists(p)]
-                    st.markdown(
-                        '<div class="gal"><img src="data:image/jpeg;'
-                        'base64,%s" /></div>' % _b64_thumb(_p0[0], box=640),
-                        unsafe_allow_html=True)
-                    st.markdown(
-                        '<div class="motif-title">%s</div>'
-                        '<div class="motif-meta">%s　·　%s</div>'
-                        % (_esc(_wid),
-                           _esc(str(_w.get("student_id") or "未署名")),
-                           "单图重组" if _w.get("mode") == "img2img"
-                           else "多纹样组合"),
-                        unsafe_allow_html=True)
-
-                    _dn = (_w.get("design_note") or "").strip()
-                    st.markdown(
-                        '<div class="gal-note">%s</div>'
-                        % (_esc("设计说明：" + _dn) if _dn
-                           else "作者还没写设计说明"),
-                        unsafe_allow_html=True)
-
-                    _n = _by_work.get(_wid, 0)
-                    st.markdown(
-                        '<div class="gal-meta">互评 %d 条%s</div>'
-                        % (_n, "　· 你已评" if _wid in _my_reviewed else ""),
-                        unsafe_allow_html=True)
-
-                    with st.expander("看详情 / 写互评"):
-                        st.markdown(
-                            "模式：%s ｜ 强度：%s ｜ 种子：%s"
-                            % (_w.get("mode"), _w.get("denoise"),
-                               _w.get("seed")))
-                        st.markdown("提示词：%s" % (_w.get("prompt") or "—"))
-                        if _dn:
-                            st.markdown("**设计说明**：%s" % _dn)
-                        st.divider()
-
-                        # 已有的互评
-                        _prs = archive.load_peer_reviews(_wid)
-                        if _prs:
-                            st.markdown("**已有互评（%d 条）**" % len(_prs))
-                            for _p in _prs:
-                                st.markdown(
-                                    "· %s：优点「%s」　建议「%s」"
-                                    % (_p.get("reviewer_name")
-                                       or _p.get("reviewer_id") or "匿名",
-                                       _p.get("merit") or "—",
-                                       _p.get("suggestion") or "—"))
-                            st.divider()
-
-                        # 写互评
-                        if not _reviewer:
-                            st.markdown(
-                                '<div class="caution">请先到 <b>⓪ 课程导航</b> '
-                                '填上学号，才能记录你的互评。</div>',
-                                unsafe_allow_html=True)
-                        elif _wid in _my_reviewed:
-                            st.markdown(
-                                '<div class="done">你已评过这件作品。'
-                                '重新提交会覆盖原评价。</div>',
-                                unsafe_allow_html=True)
-
-                        _mv = st.text_area(
-                            "优点：你看到哪里做得好？",
-                            height=70, key="pm_%s" % _wid,
-                            placeholder="例如：靛蓝底和桃红花枝的对比很克制，"
-                                        "没有堆太多颜色。")
-                        _sg = st.text_area(
-                            "建议：给一条具体、可操作的建议",
-                            height=70, key="ps_%s" % _wid,
-                            placeholder="例如：花心可以再收一点，"
-                                        "现在和外圈花瓣一样重，注意力散了。")
-                        # 自己不能评自己 —— 否则互评环节失去意义
-                        if _w.get("student_id") == _reviewer:
-                            st.caption("这是你自己的作品，跳过互评。")
-                        elif st.button("提交互评", key="pbtn_%s" % _wid):
-                            if not _mv.strip() or not _sg.strip():
-                                st.warning("优点和建议都要写。"
-                                           "只说「挺好的」不算互评。")
-                            else:
-                                archive.add_peer_review(
-                                    _wid, reviewer_id=_reviewer,
-                                    reviewer_name=st.session_state.get(
-                                        "student_name", "") or _reviewer,
-                                    merit=_mv.strip(), suggestion=_sg.strip())
-                                st.success("已提交")
-                                st.rerun()
-
-
-# ------------------------------------------------------------------
 # ④ 提取纹样
 # ------------------------------------------------------------------
 with tab_extract:
@@ -1819,7 +1649,7 @@ with tab_annotate:
                     values[field] = st.text_input(label, value=cur_val,
                                                   key="f_%s_%s_%d" % (field, gid, ver))
 
-            st.markdown("##### 加分项（可选，能填尽量填）")
+            st.markdown("##### 加分项")
             for field in ANNOTATION_FIELDS:
                 if field in REQUIRED_FIELDS:
                     continue
@@ -2045,6 +1875,114 @@ with tab_graph:
                 unsafe_allow_html=True)
 
             # ==============================================================
+            # 板块〇：把整张图的骨架画出来（结构可视化）
+            # ==============================================================
+            # 学生第一次见图数据库，最缺的不是查询语法，而是
+            # 「这张图长什么样」的整体印象。这里把标签聚成节点、
+            # 关系类型聚成边，用真实数量画一张结构图 —— 数字是真的，
+            # 布局用确定性环形，不会每次刷新乱跳。
+            st.subheader("图结构一览")
+            try:
+                import math
+                import plotly.graph_objects as _go
+                _can_plot = True
+            except ImportError:
+                _can_plot = False
+
+            # 结构数据永远取自 CSV 图（规模固定、加载快）；
+            # Neo4j 只是查询引擎，图的结构两边一致。
+            _cg = g_obj if hasattr(g_obj, "nodes") \
+                else _get_csv_graph(PROJECT_DIR)
+            if _cg is None or not hasattr(_cg, "nodes"):
+                st.caption("无图数据，跳过结构图。")
+            elif not _can_plot:
+                st.caption("未安装 plotly，无法绘制结构图"
+                           "（pip install plotly 后重启）。")
+            else:
+                _by_label = {}
+                for _nd in _cg.nodes.values():
+                    _by_label[_nd["label"]] = \
+                        _by_label.get(_nd["label"], 0) + 1
+                _lab_of = {nid: nd["label"]
+                           for nid, nd in _cg.nodes.items()}
+                _edges = {}
+                for _r in _cg.rels:
+                    _a = _lab_of.get(_r["start"])
+                    _b = _lab_of.get(_r["end"])
+                    if not _a or not _b:
+                        continue
+                    _k = (_a, _r["type"], _b)
+                    _edges[_k] = _edges.get(_k, 0) + 1
+
+                _labels = sorted(_by_label, key=lambda L: -_by_label[L])
+                _n = max(len(_labels), 1)
+                _pos = {L: (math.cos(2 * math.pi * i / _n),
+                            math.sin(2 * math.pi * i / _n))
+                        for i, L in enumerate(_labels)}
+
+                _fig = _go.Figure()
+                _palette = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2",
+                            "#59a14f", "#edc948", "#b07aa1", "#ff9da7"]
+
+                for (_a, _t, _b), _cnt in sorted(_edges.items()):
+                    if _a == _b:
+                        # 同类内部的关系（如 Image→Image 的变体）：
+                        # 画成节点外侧的一段弧，不然会在环里画成直线穿过圆心
+                        _cx, _cy = _pos[_a]
+                        _ang = math.atan2(_cy, _cx)
+                        _xs, _ys = [], []
+                        for _s in range(13):
+                            _t2 = _s / 12.0
+                            _aa = _ang + (-0.32 + 0.64 * _t2)
+                            # 弧从节点外缘起跳（半径 1.12 起），
+                            # 不然弧的根部会被节点圆盖住，看着像断了
+                            _rr = 1.12 + 0.22 * math.sin(math.pi * _t2)
+                            _xs.append(_rr * math.cos(_aa))
+                            _ys.append(_rr * math.sin(_aa))
+                        _fig.add_trace(_go.Scatter(
+                            x=_xs, y=_ys, mode="lines",
+                            line=dict(width=1 + min(5, _cnt ** 0.5),
+                                      color="#c8c8c8"),
+                            hovertemplate="%s —[%s]→ %s（%d 条）"
+                            % (_a, _t, _b, _cnt),
+                            showlegend=False))
+                        continue
+                    _x0, _y0 = _pos[_a]
+                    _x1, _y1 = _pos[_b]
+                    _fig.add_trace(_go.Scatter(
+                        x=[_x0, _x1], y=[_y0, _y1], mode="lines",
+                        line=dict(width=1 + min(5, _cnt ** 0.5),
+                                  color="#c8c8c8"),
+                        hovertemplate="%s —[%s]→ %s（%d 条）"
+                        % (_a, _t, _b, _cnt),
+                        showlegend=False))
+
+                for _i, L in enumerate(_labels):
+                    _x, _y = _pos[L]
+                    _fig.add_trace(_go.Scatter(
+                        x=[_x], y=[_y], mode="markers+text",
+                        marker=dict(
+                            size=20 + min(42, _by_label[L] ** 0.5 * 2),
+                            color=_palette[_i % len(_palette)],
+                            line=dict(width=1.5, color="white")),
+                        text=["%s<br>%s" % (L, format(_by_label[L], ","))],
+                        textposition="bottom center",
+                        hoverinfo="text",
+                        hovertext="%s：%s 个节点" % (L, _by_label[L]),
+                        showlegend=False))
+
+                _fig.update_layout(
+                    height=560, margin=dict(l=10, r=10, t=10, b=30),
+                    xaxis=dict(visible=False),
+                    yaxis=dict(visible=False, scaleanchor="x",
+                               scaleratio=1),
+                    plot_bgcolor="white")
+                st.plotly_chart(_fig, width="stretch",
+                                config={"displayModeBar": False})
+                st.caption("圆的大小 = 该类节点数量，连线粗细 = 关系条数，"
+                           "悬停看具体数字。数据来自当前数据集，不是示意图。")
+
+            # ==============================================================
             # 板块一：什么是图数据库（知识科普）
             # ==============================================================
             st.divider()
@@ -2205,6 +2143,177 @@ with tab_graph:
                 "当你的问题变成「这两个东西之间怎么走过去的」、"
                 "「和它有关系的还有谁」时，图的优势会立刻显现；"
                 "而单纯的求和、计数、报表，关系型数据库依然是更成熟的选择。")
+
+
+# ------------------------------------------------------------------
+# ⑦ 作品展示墙
+# ------------------------------------------------------------------
+# 与 ③ 我的作品 的区别：
+#   ③ 是个人视角（我的作品、我填说明、教师对我的审核）
+#   ⑦ 是班级视角（全班作品、我给别人写互评）
+# 方案第四单元要求「完成作品展示、互评和过程归档」，
+# 互评必须发生在**别人的**作品上，所以单独一页。
+with tab_gallery:
+    st.markdown(
+        '<div class="done">全班作品展示墙。</div>', unsafe_allow_html=True)
+    st.write("")
+
+    _all_works = archive.load()
+    _gallery = [w for w in _all_works if (w.get("output_path") or "").strip()]
+    # 只展示有图的（文件确实存在的），否则展示墙全是破图
+    _gallery = [w for w in _gallery
+                if any(os.path.exists(p)
+                       for p in (w.get("output_path") or "").split(",") if p)]
+
+    if not _gallery:
+        st.markdown(
+            '<div class="note">还没有作品。</div>',
+            unsafe_allow_html=True)
+    else:
+        _pr_all = archive.peer_review_stats()
+        _by_work = _pr_all.get("by_work", {})
+        _reviewer = st.session_state.get("student_id", "").strip()
+
+        # ---- 筛选 ----
+        _g1, _g2, _g3 = st.columns([2, 2, 3])
+        with _g1:
+            _g_mode = st.selectbox(
+                "创作模式",
+                ["全部", "单图重组", "多纹样组合"],
+                key="gal_mode")
+        with _g2:
+            _g_only_unreviewed = st.checkbox("只看我还没评的", value=False,
+                                             key="gal_unrev")
+        with _g3:
+            _g_sort = st.radio("排序", ["最新在前", "互评最多"],
+                               horizontal=True, key="gal_sort")
+
+        _rows = list(_gallery)
+        if _g_mode == "单图重组":
+            _rows = [w for w in _rows if (w.get("mode") or "") == "img2img"]
+        elif _g_mode == "多纹样组合":
+            _rows = [w for w in _rows if (w.get("mode") or "") == "multi_motif"]
+
+        _my_reviewed = set()
+        if _reviewer:
+            _my_reviewed = {r.get("work_id")
+                            for r in archive.load_peer_reviews()
+                            if r.get("reviewer_id") == _reviewer}
+        if _g_only_unreviewed and _reviewer:
+            _rows = [w for w in _rows if w.get("work_id") not in _my_reviewed]
+
+        if _g_sort == "互评最多":
+            _rows.sort(key=lambda w: _by_work.get(w.get("work_id"), 0),
+                       reverse=True)
+        else:
+            _rows.reverse()  # load() 是按写入顺序，倒过来即最新在前
+
+        st.markdown(
+            '<div class="src">展示 <b>%d</b> 件作品　｜　'
+            '全班互评共 <b>%d</b> 条%s</div>'
+            % (len(_rows), _pr_all.get("total", 0),
+               ("　｜　你已评 <b>%d</b> 件" % len(_my_reviewed))
+               if _reviewer else "　｜　（填学号后可记录你的互评）"),
+            unsafe_allow_html=True)
+        st.write("")
+
+        # ---- 网格：每行 3 件 ----
+        _COLS = 3
+        for _i in range(0, len(_rows), _COLS):
+            _batch = _rows[_i:_i + _COLS]
+            _cols = st.columns(_COLS, gap="medium")
+            for _col, _w in zip(_cols, _batch):
+                with _col:
+                    _wid = _w.get("work_id") or ""
+                    _p0 = [p for p in (_w.get("output_path") or "").split(",")
+                           if p and os.path.exists(p)]
+                    st.markdown(
+                        '<div class="gal"><img src="data:image/jpeg;'
+                        'base64,%s" /></div>' % _b64_thumb(_p0[0], box=640),
+                        unsafe_allow_html=True)
+                    st.markdown(
+                        '<div class="motif-title">%s</div>'
+                        '<div class="motif-meta">%s　·　%s</div>'
+                        % (_esc(_wid),
+                           _esc(str(_w.get("student_id") or "未署名")),
+                           "单图重组" if _w.get("mode") == "img2img"
+                           else "多纹样组合"),
+                        unsafe_allow_html=True)
+
+                    _dn = (_w.get("design_note") or "").strip()
+                    st.markdown(
+                        '<div class="gal-note">%s</div>'
+                        % (_esc("设计说明：" + _dn) if _dn
+                           else "作者还没写设计说明"),
+                        unsafe_allow_html=True)
+
+                    _n = _by_work.get(_wid, 0)
+                    st.markdown(
+                        '<div class="gal-meta">互评 %d 条%s</div>'
+                        % (_n, "　· 你已评" if _wid in _my_reviewed else ""),
+                        unsafe_allow_html=True)
+
+                    with st.expander("看详情 / 写互评"):
+                        st.markdown(
+                            "模式：%s ｜ 强度：%s ｜ 种子：%s"
+                            % (_w.get("mode"), _w.get("denoise"),
+                               _w.get("seed")))
+                        st.markdown("提示词：%s" % (_w.get("prompt") or "—"))
+                        if _dn:
+                            st.markdown("**设计说明**：%s" % _dn)
+                        st.divider()
+
+                        # 已有的互评
+                        _prs = archive.load_peer_reviews(_wid)
+                        if _prs:
+                            st.markdown("**已有互评（%d 条）**" % len(_prs))
+                            for _p in _prs:
+                                st.markdown(
+                                    "· %s：优点「%s」　建议「%s」"
+                                    % (_p.get("reviewer_name")
+                                       or _p.get("reviewer_id") or "匿名",
+                                       _p.get("merit") or "—",
+                                       _p.get("suggestion") or "—"))
+                            st.divider()
+
+                        # 写互评
+                        if not _reviewer:
+                            st.markdown(
+                                '<div class="caution">请先到 <b>⓪ 课程导航</b> '
+                                '填上学号，才能记录你的互评。</div>',
+                                unsafe_allow_html=True)
+                        elif _wid in _my_reviewed:
+                            st.markdown(
+                                '<div class="done">你已评过这件作品。'
+                                '重新提交会覆盖原评价。</div>',
+                                unsafe_allow_html=True)
+
+                        _mv = st.text_area(
+                            "优点：你看到哪里做得好？",
+                            height=70, key="pm_%s" % _wid,
+                            placeholder="例如：靛蓝底和桃红花枝的对比很克制，"
+                                        "没有堆太多颜色。")
+                        _sg = st.text_area(
+                            "建议：给一条具体、可操作的建议",
+                            height=70, key="ps_%s" % _wid,
+                            placeholder="例如：花心可以再收一点，"
+                                        "现在和外圈花瓣一样重，注意力散了。")
+                        # 自己不能评自己 —— 否则互评环节失去意义
+                        if _w.get("student_id") == _reviewer:
+                            st.caption("这是你自己的作品，跳过互评。")
+                        elif st.button("提交互评", key="pbtn_%s" % _wid):
+                            if not _mv.strip() or not _sg.strip():
+                                st.warning("优点和建议都要写。"
+                                           "只说「挺好的」不算互评。")
+                            else:
+                                archive.add_peer_review(
+                                    _wid, reviewer_id=_reviewer,
+                                    reviewer_name=st.session_state.get(
+                                        "student_name", "") or _reviewer,
+                                    merit=_mv.strip(), suggestion=_sg.strip())
+                                st.success("已提交")
+                                st.rerun()
+
 
 
 # ------------------------------------------------------------------

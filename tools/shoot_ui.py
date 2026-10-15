@@ -15,24 +15,48 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
+import re
 import sys
 import time
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(APP_DIR, "data", "ui_shots")
+APP = os.path.join(APP_DIR, "app", "streamlit_app.py")
 
-# 标签页名称（与 streamlit_app.py 里 st.tabs 的定义一致）
-TAB_NAMES = [
-    "⓪ 课程导航",
-    "① 检索纹样",
-    "② AI 重组创作",
-    "③ 我的作品",
-    "⑦ 作品展示墙",
-    "④ 提取纹样",
-    "⑤ 标注纹样",
-    "⑥ 知识图谱",
-]
+# 标签页名称**从应用源码里读**，不要在这里再抄一份。
+#
+# 踩过的坑：这里原本硬编码着一份页签列表，把 ⑦ 作品展示墙 挪到
+# 最后时，只改了 streamlit_app.py，忘了改这里 —— 结果这个工具继续
+# 按旧顺序点页签，截图全部指鹿为马（点 ⑥ 的位置拿到的是 ⑦ 的图）。
+# 同一个事实在两处各写一份，改一处必然漏另一处，所以直接读源头。
+
+_CIRCLED = {"⓪": "0", "①": "1", "②": "2", "③": "3", "④": "4",
+           "⑤": "5", "⑥": "6", "⑦": "7", "⑧": "8", "⑨": "9"}
+
+
+def load_tab_names():
+    """从 app/streamlit_app.py 的 st.tabs([...]) 里读出页签与顺序。"""
+    with io.open(APP, encoding="utf-8") as f:
+        src = f.read()
+    m = re.search(r"st\.tabs\(\s*\[(.*?)\]\s*\)", src, re.S)
+    if not m:
+        raise RuntimeError("在 %s 里找不到 st.tabs([...])，无法读取页签"
+                           % os.path.relpath(APP, APP_DIR))
+    names = re.findall(r"\"([^\"]+)\"|'([^']+)'", m.group(1))
+    names = [a or b for a, b in names]
+    if not names:
+        raise RuntimeError("st.tabs([...]) 里没解析出任何页签名")
+    return names
+
+
+def safe_name(name):
+    """把页签名转成文件名 —— ⑦ 也要处理，否则带圈字符进文件名会乱码。"""
+    out = []
+    for ch in name:
+        out.append(_CIRCLED.get(ch, ch))
+    return "".join(out).replace(" ", "_")
 
 
 def main() -> int:
@@ -57,8 +81,15 @@ def main() -> int:
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
+    try:
+        tab_names = load_tab_names()
+    except (RuntimeError, OSError) as e:
+        print("[失败] %s" % e)
+        return 2
+    print("页签（读自 app/streamlit_app.py）：%s" % " ".join(tab_names))
+
     targets = ([args.only] if args.only is not None
-               else list(range(len(TAB_NAMES))))
+               else list(range(len(tab_names))))
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -75,8 +106,8 @@ def main() -> int:
         time.sleep(3)
 
         for idx in targets:
-            name = TAB_NAMES[idx]
-            print("截图 %d/%d：%s" % (idx + 1, len(TAB_NAMES), name))
+            name = tab_names[idx]
+            print("截图 %d/%d：%s" % (idx + 1, len(tab_names), name))
             try:
                 # 点击对应标签
                 tab = page.get_by_role("tab", name=name)
@@ -89,11 +120,8 @@ def main() -> int:
                 print("  跳过（找不到标签）：%s" % str(e)[:80])
                 continue
 
-            safe = name.replace(" ", "_").replace("①", "1") \
-                       .replace("②", "2").replace("③", "3") \
-                       .replace("④", "4").replace("⑤", "5") \
-                       .replace("⑥", "6")
-            fp = os.path.join(OUT_DIR, "%02d_%s.png" % (idx + 1, safe))
+            fp = os.path.join(OUT_DIR,
+                              "%02d_%s.png" % (idx + 1, safe_name(name)))
             page.screenshot(path=fp, full_page=args.full)
             print("  -> %s" % os.path.relpath(fp, APP_DIR))
 

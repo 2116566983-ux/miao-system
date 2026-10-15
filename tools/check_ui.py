@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import traceback
@@ -134,6 +135,45 @@ def e2e_annotate(at, tmp_csv):
     return ok
 
 
+def children_of(el):
+    """容器的子节点。AppTest 有的容器用 dict 存，有的用 list 存。"""
+    ch = getattr(el, "children", None)
+    return list(ch.values()) if isinstance(ch, dict) else list(ch or [])
+
+
+def walk(el):
+    yield el
+    for c in children_of(el):
+        for x in walk(c):
+            yield x
+
+
+def text_of(el):
+    """取元素文本。dataframe 的 value 是 DataFrame，别拿去做真值判断。"""
+    v = getattr(el, "value", None)
+    return v if isinstance(v, str) else ""
+
+
+def find_plots(container):
+    """取出容器里所有 plotly 图的 (traces, layout)。
+
+    AppTest 没有 plotly 专用访问器，图在元素树里表现为
+    UnknownElement，真正的类型得看 proto 的类名。
+    """
+    out = []
+    for e in walk(container):
+        if type(e).__name__ != "UnknownElement":
+            continue
+        if type(getattr(e, "proto", None)).__name__ != "PlotlyChart":
+            continue
+        try:
+            fig = json.loads(e.proto.spec)
+        except (ValueError, AttributeError, TypeError):
+            continue
+        out.append((fig.get("data", []), fig.get("layout", {})))
+    return out
+
+
 def main():
     print("=" * 62)
     print("界面无头自测（AppTest）")
@@ -221,11 +261,51 @@ def main():
     else:
         print("  [PASS] 八个标签页均已渲染（当前 %d 个）" % len(at.tabs))
 
+    # ---- 页签顺序 ----
+    #
+    # 本文件早年有一句注释说「AppTest 读不到页签标题文本」，那是过时的：
+    # 实测 streamlit 1.65 的 Tab 元素有 .label。能读到就应该守顺序 ——
+    # 用户明确要求「作品展示墙移到最后面去」，搬错位置这里必须报出来。
+    # 读不到 label 的环境（老版本）则整段跳过，不误判失败。
+    _labels = [getattr(t, "label", "") for t in at.tabs]
+    if any(not L for L in _labels):
+        print("  [跳过] 页签顺序 —— 当前 streamlit 读不到 Tab 标题文本")
+    else:
+        # ⑦ 在最后是用户要求的；其余按 ⓪→⑥ 的业务链路顺序。
+        _want = ["⓪ 课程导航", "① 检索纹样", "② AI 重组创作",
+                 "③ 我的作品", "④ 提取纹样", "⑤ 标注纹样",
+                 "⑥ 知识图谱", "⑦ 作品展示墙"]
+        if _labels == _want:
+            print("  [PASS] 页签顺序正确：%s" % " ".join(_labels))
+        elif _labels[-1] == "⑦ 作品展示墙":
+            print("  [PASS] ⑦ 作品展示墙 排在最后（顺序为 %s）"
+                  % " ".join(_labels))
+        else:
+            ok = False
+            print("  [FAIL] ⑦ 作品展示墙 不在最后，当前顺序：%s"
+                  % " ".join(_labels))
+
+    # ---- 每个页面都画出了东西（空页是最容易漏的一类回归）----
+    #
+    # 移动页面时最容易出的错：整块搬过去了，但漏搬了收尾的 with，
+    # 结果是页面存在却空空如也 —— 数量对、内容是空的，前面几条
+    # 按按钮/关键词的断言全都发现不了。
+    _empty = []
+    for _t in at.tabs:
+        if len(list(walk(_t))) <= 1:      # Tab 容器自己算一个
+            _empty.append(getattr(_t, "label", "?"))
+    if _empty:
+        ok = False
+        print("  [FAIL] 存在空页面：%s" % "、".join(_empty))
+    else:
+        print("  [PASS] 八个页面全部有内容，无空页")
+
     # ---- ⓪ 课程导航：单元与分层说明确实渲染出来了 ----
     #
-    # 说明：AppTest 的 at.tabs 只能数出页签个数，读不到页签标题文本，
-    # 所以「课程导航页里到底有没有内容」只能回到 markdown 正文找关键词。
-    # 缺了这几个词，就说明 course.UNITS 被改坏了、或页面里的循环没跑全。
+    # 说明：页签标题文本在 streamlit 1.65 上是可以读到的（见上面
+    # 「页签顺序」那段），但**页签内的内容**仍只能回到 markdown 正文
+    # 找关键词 —— 因为 at.markdown 是全页合计，没有按页拆分。
+    # 缺了这几个词，就说明 course.UNITS 被改坏了、或页面里的循环没跑全
     #
     # 关键词怎么选的（对着 app/streamlit_app.py 的 ⓪ 页实现核对过）：
     #   ·「课时」   —— 出现在单元小标题「第 N 单元 · X 课时（理论…）」里，
@@ -300,6 +380,104 @@ def main():
         print("  [FAIL] 找不到「执行查询」按钮，知识图谱页可能没渲染")
     else:
         print("  [PASS] 知识图谱页已渲染")
+
+    # ---- ⑥ 知识图谱：结构图真的画出来了 ----
+    #
+    # 「页面渲染了」和「图真的画出来了」是两件事：只要 plotly 没装、
+    # 或图数据没加载，那段代码会静默走降级分支，页面照样有按钮、
+    # 照样没异常 —— 但学生看到的是一片空白。
+    # 所以这里既要有正面证据（trace 里带真实坐标），
+    # 也要有反面证据（没有落到「未安装 plotly / 无图数据」的提示）。
+    _tab6 = at.tabs[6] if len(at.tabs) >= 7 else None
+    if _tab6 is None:
+        ok = False
+        print("  [FAIL] 找不到第 6 个页面（知识图谱）")
+    else:
+        _t6_text = [text_of(e) for e in walk(_tab6)]
+        _t6_all = " ".join(_t6_text)
+
+        if "图结构一览" not in _t6_all:
+            ok = False
+            print("  [FAIL] ⑥ 页缺少「图结构一览」小节")
+        else:
+            print("  [PASS] ⑥ 页结构图小节已渲染")
+
+        _fallback = [s for s in _t6_text
+                     if "未安装 plotly" in s or "无图数据" in s]
+        if _fallback:
+            ok = False
+            print("  [FAIL] ⑥ 页结构图落到了降级分支：%s" % _fallback)
+        else:
+            print("  [PASS] ⑥ 页结构图没有降级（图是真的画了）")
+
+        _plots = find_plots(_tab6)
+        if len(_plots) != 1:
+            ok = False
+            print("  [FAIL] ⑥ 页应有 1 张结构图，实际 %d 张" % len(_plots))
+        else:
+            _traces, _layout = _plots[0]
+            _marks = [t for t in _traces
+                      if "markers" in (t.get("mode") or "")]
+            _lines = [t for t in _traces
+                      if (t.get("mode") or "") == "lines"]
+            _blank = [t for t in _traces if not t.get("x")]
+
+            if len(_marks) >= 2 and len(_lines) >= 1:
+                print("  [PASS] 结构图有 %d 个节点、%d 条关系边"
+                      % (len(_marks), len(_lines)))
+            else:
+                ok = False
+                print("  [FAIL] 结构图节点或边缺失（节点 %d，边 %d）"
+                      % (len(_marks), len(_lines)))
+
+            if _blank:
+                ok = False
+                print("  [FAIL] 有 %d 条 trace 没有坐标数据（画出来是隐形的）"
+                      % len(_blank))
+            else:
+                print("  [PASS] 全部 %d 条 trace 都带坐标" % len(_traces))
+
+            # 节点标签必须是「类型<br>真实数量」，光有圆点不算数
+            _labelled = [t for t in _marks
+                         if t.get("text") and "<br>" in str(t["text"][0])]
+            if len(_labelled) == len(_marks) and _marks:
+                print("  [PASS] 节点标注了真实数量：%s"
+                      % "、".join(str(t["text"][0]).replace("<br>", " ")
+                                  for t in _marks))
+            else:
+                ok = False
+                print("  [FAIL] 只有 %d/%d 个节点标了数量"
+                      % (len(_labelled), len(_marks)))
+
+            # 自环（如 Image -[派生自]-> Image）必须画成外侧弧；
+            # 若退化成直线，会在环内穿过圆心，把整张图搅乱。
+            _arcs = [t for t in _lines if len(t.get("x", [])) > 2]
+            if _arcs:
+                print("  [PASS] %d 条自环画成了外侧弧线" % len(_arcs))
+            else:
+                print("  [提示] 当前数据集没有同类之间的关系，弧线分支未触发")
+
+            if _layout.get("height") == 560:
+                print("  [PASS] 图高固定 560，不会撑变形")
+            else:
+                ok = False
+                print("  [FAIL] 图高不是 560，实际 %s" % _layout.get("height"))
+
+    # ---- 界面上不该再出现的文案（被用户点名删掉的）----
+    #
+    # 这类文案删掉之后最容易「活过来」：有人照着旧文档改界面，
+    # 一眼看过去界面正常，但那句话又回来了。扫源码 + 扫渲染结果各一次。
+    for _bad in ["（可选，能填尽量填）"]:
+        try:
+            with open(APP, encoding="utf-8") as _f:
+                _src = _f.read()
+        except OSError:
+            _src = ""
+        if _bad in _src or _bad in _md_all:
+            ok = False
+            print("  [FAIL] 已删除的文案又出现了：%s" % _bad)
+        else:
+            print("  [PASS] 已删除的文案没有复活：%s" % _bad)
 
     # 标注页应产生若干下拉框（11 个字段，其中 6 个是下拉）
     if len(at.selectbox) < 4:
