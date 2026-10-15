@@ -1481,71 +1481,98 @@ check("对照表有不少于 5 行对比", len(tv.get("rows", [])) >= 5)
 check("对照表有结论", bool(tv.get("结论")))
 
 # --- CSV 内存图构建 ---
-_cg = gteach.build_csv_graph(ROOT)
-check("CSV 图可构建", _cg is not None)
-if _cg is not None:
-    _st = _cg.stats()
-    check("图里有节点", _st["nodes"] > 100, "节点 %d" % _st["nodes"])
-    check("图里有关系", _st["rels"] > 100, "关系 %d" % _st["rels"])
-    check("有 Image 节点", _st["by_label"].get("Image", 0) >= 1000,
-          "%d" % _st["by_label"].get("Image", 0))
-    check("有 MotifGroup 节点", _st["by_label"].get("MotifGroup", 0) >= 200)
-    check("有 Color 节点", _st["by_label"].get("Color", 0) > 0)
-    check("有 GeneratedWork 节点",
-          _st["by_label"].get("GeneratedWork", 0) >= 1)
-    check("有 HAS_VARIANT 关系", _st["by_rel"].get("HAS_VARIANT", 0) > 0)
-    check("有 DERIVED_FROM 关系",
-          _st["by_rel"].get("DERIVED_FROM", 0) > 0)
-    check("有 USES_COLOR 关系", _st["by_rel"].get("USES_COLOR", 0) > 0)
+# 作品数据（metadata/works.csv）是运行时产物，.gitignore 第 33 行明确忽略了它。
+# 干净 clone 出来必然没有这个文件，而 GeneratedWork 节点正是从它来的 ——
+# 所以这里**自己种一条最小记录**，让"有 GeneratedWork 节点"这条断言在任何
+# 机器上都能真跑。
+# 踩过一次才知道：最初这条断言默认机器上有历史数据，结果干净副本里直接失败，
+# 而原机器因为跑过界面全绿，等于"假装通过"。测试不能依赖环境里恰好有什么。
+_WORK_CSV = os.path.join(ROOT, "metadata", "works.csv")
+_seeded = False
+if not os.path.exists(_WORK_CSV):
+    _seed_ar = WorkArchive(_WORK_CSV, os.path.join(ROOT, "data", "generated"))
+    _seed_ar.record(student_id="TEST_SEED", student_name="自造数据",
+                    source_images=["basic_0"], mode="img2img",
+                    prompt="seed", output_path="", design_note="由测试自造")
+    _seeded = True
 
-    # --- 每条预设都要能跑通，且结构合法（不抛异常）---
-    for _p in gteach.QUERY_PRESETS:
-        _pid = _p["id"]
-        try:
-            _r = _cg.run_preset(_pid, _p.get("params_hint"))
-            _ok = isinstance(_r, list)
-        except Exception as _e:
-            _r, _ok = None, False
-            print("        (%s 抛异常 %s)" % (_pid, _e))
-        check("预设 %s 可执行且返回列表" % _pid, _ok)
+try:
+    _cg = gteach.build_csv_graph(ROOT)
+    check("CSV 图可构建", _cg is not None)
+    if _cg is not None:
+        _st = _cg.stats()
+        check("图里有节点", _st["nodes"] > 100, "节点 %d" % _st["nodes"])
+        check("图里有关系", _st["rels"] > 100, "关系 %d" % _st["rels"])
+        check("有 Image 节点", _st["by_label"].get("Image", 0) >= 1000,
+              "%d" % _st["by_label"].get("Image", 0))
+        check("有 MotifGroup 节点", _st["by_label"].get("MotifGroup", 0) >= 200)
+        check("有 Color 节点", _st["by_label"].get("Color", 0) > 0)
+        check("有 GeneratedWork 节点",
+              _st["by_label"].get("GeneratedWork", 0) >= 1)
+        check("有 HAS_VARIANT 关系", _st["by_rel"].get("HAS_VARIANT", 0) > 0)
+        check("有 DERIVED_FROM 关系",
+              _st["by_rel"].get("DERIVED_FROM", 0) > 0)
+        check("有 USES_COLOR 关系", _st["by_rel"].get("USES_COLOR", 0) > 0)
 
-    # --- 关键查询的语义正确性 ---
-    _var = _cg.q_variant_chain("basic_0")
-    check("① 变体查询有结果", len(_var) > 0, "%d 行" % len(_var))
-    check("① 变体查询的源图正确",
-          all(r["源图"] == "basic_0" for r in _var))
-    check("① 变体结果含 color/texture/mixup 类型",
-          any(r["类型"] in ("color", "texture", "mixup") for r in _var))
+        # --- 每条预设都要能跑通，且结构合法（不抛异常）---
+        for _p in gteach.QUERY_PRESETS:
+            _pid = _p["id"]
+            try:
+                _r = _cg.run_preset(_pid, _p.get("params_hint"))
+                _ok = isinstance(_r, list)
+            except Exception as _e:
+                _r, _ok = None, False
+                print("        (%s 抛异常 %s)" % (_pid, _e))
+            check("预设 %s 可执行且返回列表" % _pid, _ok)
 
-    _two = _cg.q_two_hop("basic_0", depth=2)
-    check("② 两跳查询有结果", len(_two) > 0, "%d 行" % len(_two))
+        # --- 关键查询的语义正确性 ---
+        _var = _cg.q_variant_chain("basic_0")
+        check("① 变体查询有结果", len(_var) > 0, "%d 行" % len(_var))
+        check("① 变体查询的源图正确",
+              all(r["源图"] == "basic_0" for r in _var))
+        check("① 变体结果含 color/texture/mixup 类型",
+              any(r["类型"] in ("color", "texture", "mixup") for r in _var))
 
-    _nb = _cg.q_neighbors("basic_8")
-    check("③ 邻居查询有结果", len(_nb) > 0, "%d 行" % len(_nb))
-    check("③ 邻居结果有类型列",
-          all("邻居类型" in r and "关系" in r for r in _nb))
+        _two = _cg.q_two_hop("basic_0", depth=2)
+        check("② 两跳查询有结果", len(_two) > 0, "%d 行" % len(_two))
 
-    _sc = _cg.q_shared_color("basic_0")
-    check("④ 共色查询有结果", len(_sc) > 0, "%d 行" % len(_sc))
-    check("④ 共色结果是按数量降序",
-          all(_sc[i]["同色图片数"] >= _sc[i + 1]["同色图片数"]
-              for i in range(len(_sc) - 1)))
+        _nb = _cg.q_neighbors("basic_8")
+        check("③ 邻居查询有结果", len(_nb) > 0, "%d 行" % len(_nb))
+        check("③ 邻居结果有类型列",
+              all("邻居类型" in r and "关系" in r for r in _nb))
 
-    _rg = _cg.q_count_by_region()
-    check("⑤ 地域统计可执行", isinstance(_rg, list))
-    check("⑤ 地域统计按图片数降序",
-          all(_rg[i]["图片数"] >= _rg[i + 1]["图片数"]
-              for i in range(len(_rg) - 1)))
+        _sc = _cg.q_shared_color("basic_0")
+        check("④ 共色查询有结果", len(_sc) > 0, "%d 行" % len(_sc))
+        check("④ 共色结果是按数量降序",
+              all(_sc[i]["同色图片数"] >= _sc[i + 1]["同色图片数"]
+                  for i in range(len(_sc) - 1)))
 
-    _tr = _cg.q_tech_region()
-    check("⑥ 技法×地域可执行", isinstance(_tr, list))
+        _rg = _cg.q_count_by_region()
+        check("⑤ 地域统计可执行", isinstance(_rg, list))
+        check("⑤ 地域统计按图片数降序",
+              all(_rg[i]["图片数"] >= _rg[i + 1]["图片数"]
+                  for i in range(len(_rg) - 1)))
 
-    # --- 不存在的图 id 要安全返回空，而不是崩 ---
-    check("查不存在的图返回空", _cg.q_variant_chain("__nope__") == [])
-    check("查不存在的邻居返回空", _cg.q_neighbors("__nope__") == [])
+        _tr = _cg.q_tech_region()
+        check("⑥ 技法×地域可执行", isinstance(_tr, list))
 
-    # --- 不存在的预设要安全返回空列表 ---
-    check("未知预设返回空列表", _cg.run_preset("__nope__") == [])
+        # --- 不存在的图 id 要安全返回空，而不是崩 ---
+        check("查不存在的图返回空", _cg.q_variant_chain("__nope__") == [])
+        check("查不存在的邻居返回空", _cg.q_neighbors("__nope__") == [])
+
+        # --- 不存在的预设要安全返回空列表 ---
+        check("未知预设返回空列表", _cg.run_preset("__nope__") == [])
+
+finally:
+    # 自造的数据必须收走：跑完测试要在机器上留下一张假作品表的话，
+    # 界面上就会凭空多一件「TEST_SEED」的作品。连同锁文件一起删。
+    if _seeded:
+        for _p in (_WORK_CSV, _WORK_CSV + ".lock"):
+            try:
+                if os.path.exists(_p):
+                    os.remove(_p)
+            except OSError:
+                pass
 
 
 # ===========================================================================
