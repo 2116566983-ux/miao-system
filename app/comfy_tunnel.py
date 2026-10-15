@@ -17,13 +17,26 @@ ComfyUI SSH 隧道
     - 本地端口由系统分配（bind 0），避免与他人冲突
 
 用法：
-    from comfy_tunnel import get_tunnel
+    # 推荐：按环境变量一次性建立，变量名与 README/docs 保持一致
+    from comfy_tunnel import tunnel_from_env
 
-    tun = get_tunnel(host="gpu.example.edu", port=22,
-                     user="admire", password="xxx")
+    tun = tunnel_from_env()
     if tun:
         url = tun.base_url()      # http://127.0.0.1:54321
         # 用这个 url 构造 ComfyClient
+
+    # 或者手动指定
+    from comfy_tunnel import SSHTunnel
+
+    tun = SSHTunnel(host="gpu.example.edu", port=22,
+                    user="admire", password="xxx")
+    tun.start()
+    print(tun.base_url())
+
+注：本模块实际导出的是 `tunnel_from_env` 和 `SSHTunnel`
+（**不是** `get_tunnel`）。过去文档里写的 `from comfy_tunnel import
+get_tunnel` 会直接 ImportError —— 已经把名字更正过来，
+但保留这段说明，免得以后再被那份旧写法带偏。
 """
 
 from __future__ import annotations
