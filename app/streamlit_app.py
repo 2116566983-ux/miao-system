@@ -389,6 +389,27 @@ def load_csv(path):
     return df
 
 
+# ------------------------------------------------------------------
+# 把 Streamlit secrets 搬进环境变量
+# ------------------------------------------------------------------
+# 为什么必须有这一步：本系统全部按 `os.environ` 读配置（COMFYUI_URL、
+# IMAGE_API_KEY、NEO4J_URI……），但部署到 Streamlit Community Cloud 后，
+# 密钥写在云端的 Secrets 面板里，只会出现在 `st.secrets`，
+# **不会自动进 os.environ**。不桥接的话，线上那个实例永远读到空值，
+# ② 页就一直显示「AI 生成服务未连接」—— 本地明明配好了也没用。
+#
+# 仓库里只有 secrets.toml.example，真正的 secrets.toml 被忽略、不进 git；
+# 本地没有这个文件时 st.secrets 会抛异常，必须兜住，否则整个应用起不来。
+# 只搬标量：toml 的嵌套表（如 [some.section]）搬过去只会变成一段 dict 的
+# 字符串，毫无意义还可能覆盖同名真配置。
+try:
+    for _k, _v in st.secrets.items():
+        if isinstance(_v, (str, int, float, bool)):
+            os.environ.setdefault(_k, str(_v))
+except (FileNotFoundError, Exception):  # 本地没有 secrets.toml → 正常，跳过
+    pass
+
+
 graph = get_graph(
     os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
     os.environ.get("NEO4J_USER", "neo4j"),
