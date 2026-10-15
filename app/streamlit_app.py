@@ -526,9 +526,8 @@ with tab_course:
     # 当前学生的学号：⓪ 页也提供输入口，因为这是学生进系统
     # 最先看到的一页 —— 不该逼他先去 ② 页填学号。
     st.markdown(
-        '<div class="note">这门课共 <b>%d 课时</b>（理论 %d + 实践 %d），'
-        '分 <b>%d 个教学单元</b>。下面按顺序走完即可完成全部任务；'
-        '每一步都能点进对应的操作页面。</div>'
+        '<div class="note">共 <b>%d 课时</b>（理论 %d + 实践 %d），'
+        '分 <b>%d 个单元</b>。</div>'
         % (course.TOTAL_HOURS, course.THEORY_HOURS, course.PRACTICE_HOURS,
            len(course.UNITS)),
         unsafe_allow_html=True)
@@ -618,8 +617,7 @@ with tab_search:
     _hint_l, _hint_r = st.columns([3, 2])
     with _hint_l:
         st.markdown(
-            '<div class="note">按类型筛选纹样，点击「加入我的选择」收集素材，'
-            '然后到 <b>② AI 重组创作</b> 标签页生成作品。</div>',
+            '<div class="note">筛选纹样，点「加入我的选择」收集素材。</div>',
             unsafe_allow_html=True,
         )
     with _hint_r:
@@ -833,21 +831,13 @@ with tab_create:
 
     if not GEN_OK:
         st.markdown(
-            '<div class="caution"><b>AI 生成功能未连接。</b><br>'
-            '检索与归档功能正常可用。开启生成有两种方式，任选其一：</div>',
+            '<div class="caution">AI 生成功能未连接。'
+            '检索与归档功能正常可用。</div>',
             unsafe_allow_html=True)
-        st.markdown(
-            "**方式一：免费云端 API（推荐，不用装软件）**\n\n"
-            "1. 到 [魔搭社区](https://modelscope.cn) 注册并完成实名认证\n"
-            "2. 在「访问令牌」页面创建 API Key\n"
-            "3. 设置环境变量后重启本系统：\n\n"
-            "```bash\n"
-            "set IMAGE_API_KEY=你的密钥\n"
-            "```\n\n"
-            "默认使用 `Qwen/Qwen-Image-Edit`（图生图）。"
-            "每日有免费额度，额度用完次日自动重置。\n\n"
-            "**方式二：本地 ComfyUI（需 GPU，一次装好永久免费）**\n\n"
-            "见 `docs/comfyui-guide.md`，启动后设置 `COMFYUI_URL`。")
+        # 具体排查原因留给下面三行 caption —— 那是诊断信息，不是教程。
+        # 原先这里贴了一整篇「两种开启方式」的分步教程（注册魔搭、建令牌、
+        # 设环境变量……），对学生是噪音：他们改不了服务器配置，看了也没用。
+        # 遇到的人只有教师，而教师需要的是「为什么连不上」而不是教程。
         st.caption("ComfyUI 连接原因：%s" % str(comfy.error)[:150])
         st.caption("API 后端连接原因：%s" % str(apiimg.error)[:150])
         if getattr(apiimg, "hint", None):
@@ -855,8 +845,7 @@ with tab_create:
 
     if not picked:
         st.markdown(
-            '<div class="note">还没有选择素材。请先到 <b>① 检索纹样</b> '
-            '标签页挑选 1–2 张纹样。</div>', unsafe_allow_html=True)
+            '<div class="note">还没有选择素材。</div>', unsafe_allow_html=True)
     else:
         st.subheader("已选素材（%d 张）" % len(picked))
         cols = st.columns(min(6, len(picked)), gap="small")
@@ -1137,21 +1126,14 @@ with tab_create:
 with tab_works:
     _mine_sid = st.session_state.get("student_id", "").strip()
     st.markdown(
-        '<div class="done">这是<b>你自己</b>的作品台。每件作品都记录了原始素材、'
-        '提示词、随机种子和生成时间，可作为课程过程性材料。</div>',
-        unsafe_allow_html=True)
-    st.markdown(
-        '<div class="note">第四单元要求为作品补上<b>设计说明</b>——'
-        '写清你改了什么、为什么这么改。生成参数是机器记的，'
-        '设计思路只有你能写。填完会自动出现在展示墙上。</div>',
+        '<div class="done">这是<b>你自己</b>的作品台。</div>',
         unsafe_allow_html=True)
     st.write("")
 
     works = archive.load()
     if not works:
         st.markdown(
-            '<div class="note">还没有作品记录。到 <b>② AI 重组创作</b> '
-            '生成第一件作品，或到 <b>⓪ 课程导航</b> 看第三单元怎么开始。</div>',
+            '<div class="note">还没有作品记录。</div>',
             unsafe_allow_html=True)
     else:
         _f1, _f2 = st.columns([2, 2])
@@ -1217,8 +1199,7 @@ with tab_works:
                             % _esc(_dn), unsafe_allow_html=True)
                     else:
                         st.markdown(
-                            '<div class="caution">还没写设计说明。'
-                            '展开下面补填（第四单元要求）。</div>',
+                            '<div class="caution">还没写设计说明。</div>',
                             unsafe_allow_html=True)
 
                     with st.expander("填写 / 修改设计说明"):
@@ -1315,9 +1296,7 @@ with tab_works:
 # 互评必须发生在**别人的**作品上，所以单独一页。
 with tab_gallery:
     st.markdown(
-        '<div class="done">全班作品展示墙。浏览同学的作品，'
-        '为至少 <b>2 件</b> 写下互评 —— 先说看到的优点，再给一条具体建议。'
-        '</div>', unsafe_allow_html=True)
+        '<div class="done">全班作品展示墙。</div>', unsafe_allow_html=True)
     st.write("")
 
     _all_works = archive.load()
@@ -1329,8 +1308,7 @@ with tab_gallery:
 
     if not _gallery:
         st.markdown(
-            '<div class="note">展示墙还没有作品。等第一位同学在 '
-            '<b>② AI 重组创作</b> 生成作品后，这里会自动出现。</div>',
+            '<div class="note">还没有作品。</div>',
             unsafe_allow_html=True)
     else:
         _pr_all = archive.peer_review_stats()
@@ -1483,10 +1461,8 @@ with tab_gallery:
 # ------------------------------------------------------------------
 with tab_extract:
     st.markdown(
-        '<div class="note"><b>纹样是符号，不是照片。</b><br>'
-        '一张绣品照片 = 纹样 + 底布 + 拍摄角度 + 光照。这里把<b>绣线纹样本身</b>'
-        '从底布上分离出来，得到一张可复用的透明纹样，再演示它作为'
-        '<b>图案单元</b>（四方连续）和<b>浮雕特征</b>（3D 高度图）的样子。</div>',
+        '<div class="note">把<b>绣线纹样</b>从底布上分离出来，'
+        '得到可复用的透明纹样。</div>',
         unsafe_allow_html=True,
     )
     st.write("")
@@ -1663,9 +1639,8 @@ with tab_extract:
 with tab_annotate:
 
     st.markdown(
-        '<div class="note">为纹样补充「地域、技法、主色调」等属性。'
-        '这些信息程序推断不出来，但补上之后，<b>① 检索纹样</b> 就能按这些维度筛选了。'
-        '<br>一组只需标一次，全部 4 张变体会自动继承。</div>',
+        '<div class="note">补充「地域、技法、主色调」等属性。'
+        '一组只需标一次，4 张变体自动继承。</div>',
         unsafe_allow_html=True,
     )
     st.write("")
@@ -1995,12 +1970,7 @@ with tab_graph:
         st.error("图教学模块未就绪（app/graph_teach.py）")
     else:
         st.markdown(
-            '<div class="note">'
-            '<b>为什么纹样要用「图」来存，而不是表格？</b><br>'
-            '一朵苗绣花不只是「一张图」——它属于某个地域、用了某种技法、'
-            '有若干变体、被某件学生作品引用……<b>关系本身就是知识</b>。'
-            '<br>这个页面带你亲手看清：同一个问题，表格要 JOIN 三层，'
-            '图只要走一步。</div>',
+            '<div class="note">用<b>图</b>存纹样的地域、技法、变体与引用关系。</div>',
             unsafe_allow_html=True,
         )
         st.write("")
