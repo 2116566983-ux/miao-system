@@ -94,7 +94,10 @@ DEFAULT_IMAGE_ROOT = find_image_root() or ""
 
 st.set_page_config(
     page_title="苗绣纹样创作系统",
-    page_icon="🧵",
+    # 页签图标用一张全透明 PNG（app/assets/blank.png）：
+    # 用户要求去掉原来的 🧵 图标；若直接删掉 page_icon，
+    # Streamlit 会退回它自家的橙色logo，页签照样有图标。
+    page_icon="assets/blank.png",
     layout="wide",
     initial_sidebar_state="expanded",
 )
