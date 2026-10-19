@@ -66,7 +66,11 @@ MOTIF_BLUR = 6
 # 基础工具
 # ------------------------------------------------------------------
 def load_arrays(path, max_side=MAX_SIDE):
-    """读图并降采样，返回 (灰度 0-1, RGB 0-1)。"""
+    """读图并降采样，返回 (灰度 0-1, RGB 0-1, 原始尺寸(w,h))。
+
+    原始尺寸要一起带出来：后面算「主体在原图里有多少像素」时，
+    降采样后的像素数是没有意义的，必须换回原图尺度。
+    """
     with Image.open(path) as im:
         im = im.convert("RGB")
         w, h = im.size
@@ -77,7 +81,7 @@ def load_arrays(path, max_side=MAX_SIDE):
         rgb = np.asarray(im, dtype=np.float32) / 255.0
     gray = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1]
             + 0.114 * rgb[:, :, 2])
-    return gray, rgb
+    return gray, rgb, (w, h)
 
 
 def blur(a, radius):
@@ -299,6 +303,48 @@ def radial_sym(gray, na=180, nr=48):
     return max(0.0, cs[fold]), fold
 
 
+# 各产品「纹样区成品尺寸 + 印刷精度」假设（把数字写死是**假设**，不是测量结果）：
+#   钥匙扣：纹样区 3.5cm，按 300dpi 印刷 → 需要 3.5/2.54*300 ≈ 413 像素
+#   潮玩：贴图区 12cm，按 200dpi       → 需要 12/2.54*200  ≈ 945 像素
+#   包袋：图案单元 10cm，按 150dpi      → 需要 10/2.54*150  ≈ 591 像素
+# 换产品规格时只改这张表，判定逻辑不动。
+PRODUCT_SPEC = {
+    "钥匙扣徽章": {"cm": 3.5, "dpi": 300},
+    "潮玩娃娃摆件": {"cm": 12.0, "dpi": 200},
+    "包袋面料": {"cm": 10.0, "dpi": 150},
+}
+
+
+def required_px(product):
+    spec = PRODUCT_SPEC.get(product)
+    if not spec:
+        return 0
+    return int(round(spec["cm"] / 2.54 * spec["dpi"]))
+
+
+def size_verdict(motif_px, product):
+    """主体像素够不够撑起这件产品的成品尺寸。
+
+    为什么不报"厘米"：这批图是实物照片，画面里**没有尺度标尺**，
+    一张 600px 的图可能对应 5cm 也可能对应 50cm，逐图给厘米是编数。
+    试过两条路都不成立：来回缩放的相关系数太宽容（缩到两成还有 0.86，
+    因为它测的是整体结构不是细节）；零交叉密度被绣线织纹的高频噪声
+    顶住（真实照片缩到两成比值仍在 1.1 左右）。两处都记在文档里。
+
+    能算准的是**主体在原图里有多少像素** —— 它直接决定做小件会不会糊，
+    而且完全来自文件本身，不需要任何尺度假设。
+    """
+    need = required_px(product)
+    if not need or not motif_px:
+        return ""
+    ratio = motif_px / float(need)
+    if ratio >= 1.0:
+        return "够"
+    if ratio >= 0.7:
+        return "勉强"
+    return "不够"
+
+
 def direction_field(gray):
     """返回 (梯度幅值, 单模方向场, 双角余弦, 双角正弦)。
 
@@ -317,7 +363,7 @@ def direction_field(gray):
 # 单张图全指标
 # ------------------------------------------------------------------
 def a_metrics(path):
-    gray, rgb = load_arrays(path)
+    gray, rgb, (orig_w, orig_h) = load_arrays(path)
 
     # ---- 前景掩膜：背景色取四边框像素中位数（这些图多带黑边/衬布）----
     border = np.concatenate([
@@ -341,6 +387,13 @@ def a_metrics(path):
     # 带宽裁剪是按横竖密度切的，会把花瓣切掉一块，转起来当然对不上 ——
     # 而 radial_sym 自己会按能量重心找极点，不需要预先裁剪。
     radial, fold = radial_sym(gray)
+
+    # 尺寸倒推：这张纹样缩到几成还看得清
+    # 主体在原图里有多少像素 —— 注意要把降采样倍数乘回去，
+    # 否则算出来的是 512 缩放图上的像素数，跟原图分辨率无关，判"够不够"毫无意义。
+    sx = orig_w / float(gray.shape[1]) if gray.shape[1] else 1.0
+    sy = orig_h / float(gray.shape[0]) if gray.shape[0] else 1.0
+    motif_px = int(round(min((x1 - x0) * sx, (y1 - y0) * sy)))
     sym_best = max(sym_mirror, radial)
 
     # ---- 平移重复：整幅图上找（重复是画面级的性质）----
@@ -408,6 +461,7 @@ def a_metrics(path):
         "sym_best": sym_best,
         "motif_w": round(mw, 3), "motif_h": round(mh, 3),
         "motif_fill": round(mf, 3),
+        "motif_px": motif_px, "orig_w": orig_w, "orig_h": orig_h,
         "periodic": periodic, "period_px": int(period_px),
         "period_axis": period_axis,
         "dir_entropy": entropy, "top_share": top_share,
@@ -564,18 +618,20 @@ def main():
         r["score_bag"], r["score_key"] = round(s_bag, 3), round(s_key, 3)
         r["score_toy"] = round(s_toy, 3)
         r["product"], r["product_runner"] = rank[0][0], rank[1][0]
+        # 尺寸倒推：这件纹样按它推荐的产品看，缩小后还认不认得出
+        r["size_verdict"] = size_verdict(r["motif_px"], r["product"])
 
     fields = ["cat", "art_class", "file",
               "sym_mirror", "sym_lr", "sym_ud", "sym_rot180",
               "sym_radial", "rot_fold", "sym_best", "sym_grade",
               "sym_label",
               "periodic", "period_px", "period_axis",
-              "motif_w", "motif_h", "motif_fill",
+              "motif_w", "motif_h", "motif_fill", "motif_px",
               "dir_entropy", "top_share", "angular_var", "curl_tercile",
               "stream_label", "fill", "cx", "cy",
               "golden_fill", "golden_center", "golden", "golden_label",
               "score_bag", "score_key", "score_toy",
-              "product", "product_runner"]
+              "product", "product_runner", "size_verdict"]
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     with io.open(out_csv, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
@@ -596,7 +652,8 @@ def summarize(rows):
     for key, name in [("sym_label", "对称型"),
                       ("stream_label", "流线强度"),
                       ("golden_label", "黄金比贴合度"),
-                      ("product", "推荐落地产品")]:
+                      ("product", "推荐落地产品"),
+                      ("size_verdict", "尺寸适配")]:
         c = Counter(r[key] for r in rows)
         print("  %-8s：" % name, "，".join(
             "%s %d(%.0f%%)" % (k, v, 100.0 * v / len(rows))
@@ -724,6 +781,25 @@ def selftest():
          mp["rot_fold"] == 6 and sym_label(mp) == "放射对称",
          "瓣数 %d 强度 %.2f 标签 %s"
          % (mp["rot_fold"], mp["sym_radial"], sym_label(mp)))
+
+    # -- 尺寸倒推：主体像素够不够做小件 --
+    #
+    # 满幅主体（占满 256px）做钥匙扣（需 413px）应当判"不够"，
+    # 但把同一张图放大到 1024px 后重新算就够 —— 这证明判定跟着原图分辨率走，
+    # 而不是被 512 的降采样尺度锁死。
+    palette = (((xx // 64) + (yy // 64)) % 2).astype(np.float32)
+    mc = a_metrics(save_rgb("coarse.png", palette))
+    show("256px 满幅主体做钥匙扣判不够",
+         size_verdict(mc["motif_px"], "钥匙扣徽章").startswith("不够"),
+         "主体 %d px，需 %d px"
+         % (mc["motif_px"], required_px("钥匙扣徽章")))
+
+    big = np.kron(palette, np.ones((4, 4), np.float32))   # 256 → 1024
+    mb = a_metrics(save_rgb("coarse_big.png", big))
+    show("放大到 1024px 后同一纹样做钥匙扣判够",
+         size_verdict(mb["motif_px"], "钥匙扣徽章").startswith("够"),
+         "主体 %d px，需 %d px"
+         % (mb["motif_px"], required_px("钥匙扣徽章")))
 
     print()
     print("自检结果：%s" % ("全部通过" if ok else "有失败项，先修算法再跑全量"))
